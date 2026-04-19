@@ -29,6 +29,8 @@ function parseMtprotoFromHtml(html: string): string[] {
 
 export async function scrapeProxies(): Promise<void> {
     console.log("[scraper] Начинаем скрапинг...");
+    // Сбрасываем мёртвые MTProto — пусть RU агент перепроверит свежие
+    proxies.resetDeadMtproto();
     let totalMt = 0, totalS5 = 0;
 
     for (const source of SOURCES) {

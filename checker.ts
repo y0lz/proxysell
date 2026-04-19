@@ -59,6 +59,11 @@ function checkMtproto(host: string, port: number): Promise<number> {
 }
 
 async function checkOne(proxy: Proxy): Promise<void> {
+    // MTProto проверяет только RU агент — из NL они не работают
+    if (proxy.type === "MTPROTO") {
+        proxies.setStatus(proxy.id, "unchecked", null);
+        return;
+    }
     try {
         let ping: number;
         if (proxy.type === "SOCKS5") {

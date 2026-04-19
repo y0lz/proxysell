@@ -102,13 +102,9 @@ const stmtInsertProxy = db.prepare(`
   VALUES (@type, @link, @status)
 `);
 
-// Страны СНГ/РФ — прокси из них скорее всего заблокированы РКН
-const BLOCKED_COUNTRIES = new Set(["RU", "BY", "KZ", "UZ", "TM", "TJ", "AZ", "AM", "KG"]);
-
 const stmtGetFastActive = db.prepare<[], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active'
-    AND (country IS NULL OR country NOT IN (${[...BLOCKED_COUNTRIES].map(() => "?").join(",")}))
   ORDER BY ping_ms ASC
   LIMIT 1
 `);
@@ -116,7 +112,6 @@ const stmtGetFastActive = db.prepare<[], Proxy>(`
 const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active' AND type = ?
-    AND (country IS NULL OR country NOT IN (${[...BLOCKED_COUNTRIES].map(() => "?").join(",")}))
   ORDER BY ping_ms ASC
   LIMIT 1
 `);
@@ -147,15 +142,11 @@ const stmtCountByStatus = db.prepare<[string], { count: number }>(`
   SELECT COUNT(*) as count FROM proxies WHERE status = ?
 `);
 
-const blockedList = [...BLOCKED_COUNTRIES];
-
 export const proxies = {
     insert: (type: string, link: string) =>
         stmtInsertProxy.run({ type, link, status: "unchecked" }),
-    getFastActive: (): Proxy | undefined =>
-        stmtGetFastActive.get(...blockedList as [string]),
-    getFastActiveByType: (type: string): Proxy | undefined =>
-        stmtGetFastActiveByType.get(type, ...blockedList as [string]),
+    getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
+    getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
     setStatus: (id: number, status: string, ping_ms: number | null) =>
         stmtSetStatus.run({ id, status, ping_ms }),
@@ -164,6 +155,9 @@ export const proxies = {
     deleteDead: () => {
         const result = stmtDeleteDead.run();
         return result.changes;
+    },
+    resetDeadMtproto: () => {
+        db.prepare(`UPDATE proxies SET status='unchecked' WHERE type='MTPROTO' AND status='dead'`).run();
     },
     countByStatus: (status: string): number =>
         stmtCountByStatus.get(status)?.count ?? 0,

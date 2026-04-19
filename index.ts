@@ -33,8 +33,17 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+let lastScrapeTime = 0;
+const SCRAPE_COOLDOWN = 10 * 60 * 1000; // не чаще раза в 10 минут
+
     // POST /rescrape — агент просит запустить скрапер заново
     if (req.method === "POST" && req.url === "/rescrape") {
+        const now = Date.now();
+        if (now - lastScrapeTime < SCRAPE_COOLDOWN) {
+            res.writeHead(200).end(JSON.stringify({ ok: true, skipped: true }));
+            return;
+        }
+        lastScrapeTime = now;
         console.log("[api] Агент запросил повторный скрапинг...");
         void scrapeProxies();
         res.writeHead(200).end(JSON.stringify({ ok: true }));
