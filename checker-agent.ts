@@ -8,9 +8,10 @@ import { SocksProxyAgent } from "socks-proxy-agent";
 const MAIN_SERVER = process.env["MAIN_SERVER_URL"] ?? "";
 const API_SECRET  = process.env["API_SECRET"]      ?? "";
 const TIMEOUT_MS  = 6_000;
-const CONCURRENCY = 100; // увеличено для быстрого старта
+const CONCURRENCY = 100;
 const INTERVAL_MS = 5 * 60 * 1000;
 const MIN_ACTIVE  = 10;
+const MAX_ROUNDS  = 50;
 
 const TELEGRAM_DCS = [
     { host: "149.154.175.53",  port: 443 },
@@ -27,6 +28,8 @@ interface ProxyRow {
 interface CheckResult {
     id: number; status: string; ping_ms: number | null;
 }
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // ─── HTTP утилиты ─────────────────────────────────────────────────────────────
 
@@ -62,6 +65,20 @@ function apiRequest<T>(method: string, path: string, body?: unknown): Promise<T>
         if (bodyStr) req.write(bodyStr);
         req.end();
     });
+}
+
+// retry для POST /report — не теряем результаты при моргании сети
+async function reportWithRetry(results: CheckResult[], retries = 2): Promise<void> {
+    for (let i = 0; i <= retries; i++) {
+        try {
+            await apiRequest("POST", "/report", results);
+            return;
+        } catch (err) {
+            if (i === retries) { console.error("[agent] Не удалось отправить результаты:", err); return; }
+            console.warn(`[agent] Ошибка отправки, повтор ${i + 1}/${retries}...`);
+            await sleep(2_000);
+        }
+    }
 }
 
 // ─── Парсеры ──────────────────────────────────────────────────────────────────
@@ -100,11 +117,25 @@ function checkSocks5(host: string, port: number): Promise<number> {
     });
 }
 
+// MTProto: TCP + отправляем 16 случайных байт и ждём хоть какой-то ответ
+// Это лучше чем просто connect — мёртвые прокси закроют соединение сразу
 function checkMtproto(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
         const start = Date.now();
         const socket = net.createConnection({ host, port, timeout: TIMEOUT_MS });
-        socket.on("connect", () => { socket.destroy(); resolve(Date.now() - start); });
+        socket.on("connect", () => {
+            // Шлём случайные байты — живой MTProto прокси не закроет соединение сразу
+            socket.write(Buffer.from(Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))));
+        });
+        // Любой ответ = прокси живой и реагирует
+        socket.on("data", () => {
+            socket.destroy();
+            resolve(Date.now() - start);
+        });
+        // Если закрыл без ответа — мёртвый
+        socket.on("close", (hadError) => {
+            if (!hadError) reject(new Error("closed without response"));
+        });
         socket.on("timeout", () => { socket.destroy(); reject(new Error("timeout")); });
         socket.on("error", reject);
     });
@@ -128,20 +159,26 @@ async function checkOne(proxy: ProxyRow): Promise<CheckResult> {
     }
 }
 
-// ─── Основной цикл ────────────────────────────────────────────────────────────
+// ─── Батч-проверка ────────────────────────────────────────────────────────────
 
-async function checkBatch(): Promise<number> {
+// Возвращает { active, batchEmpty }
+async function checkBatch(): Promise<{ active: number; batchEmpty: boolean }> {
     let batch: ProxyRow[];
     try {
         batch = await apiRequest<ProxyRow[]>("GET", "/unchecked");
     } catch (err) {
         console.error("[agent] Не удалось получить прокси:", err);
-        return 0;
+        return { active: 0, batchEmpty: false };
     }
 
-    if (batch.length === 0) { console.log("[agent] Нет непроверенных прокси."); return 0; }
+    if (batch.length === 0) {
+        console.log("[agent] Нет непроверенных прокси.");
+        return { active: 0, batchEmpty: true };
+    }
 
-    console.log(`[agent] Проверяем ${batch.length} прокси из РФ...`);
+    const mtTotal = batch.filter(p => p.type === "MTPROTO").length;
+    const s5Total = batch.filter(p => p.type === "SOCKS5").length;
+    console.log(`[agent] Проверяем ${batch.length} прокси (MTProto: ${mtTotal}, SOCKS5: ${s5Total})...`);
 
     const results: CheckResult[] = [];
     for (let i = 0; i < batch.length; i += CONCURRENCY) {
@@ -152,60 +189,57 @@ async function checkBatch(): Promise<number> {
         }
     }
 
-    const active = results.filter(r => r.status === "active").length;
-    const dead   = results.filter(r => r.status === "dead").length;
-    const slow   = results.filter(r => r.status === "slow").length;
+    const active   = results.filter(r => r.status === "active").length;
+    const slow     = results.filter(r => r.status === "slow").length;
+    const dead     = results.filter(r => r.status === "dead").length;
     const mtActive = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "MTPROTO").length;
     const s5Active = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "SOCKS5").length;
-    const mtTotal  = batch.filter(p => p.type === "MTPROTO").length;
-    const s5Total  = batch.filter(p => p.type === "SOCKS5").length;
 
-    try {
-        await apiRequest("POST", "/report", results);
-        console.log(`[agent] Проверено: MTProto ${mtTotal} (активных: ${mtActive}), SOCKS5 ${s5Total} (активных: ${s5Active}), медленных: ${slow}, мёртвых: ${dead}`);
-    } catch (err) {
-        console.error("[agent] Не удалось отправить результаты:", err);
-    }
+    console.log(`[agent] Результат: MTProto активных ${mtActive}/${mtTotal}, SOCKS5 активных ${s5Active}/${s5Total}, медленных: ${slow}, мёртвых: ${dead}`);
 
-    return active;
+    await reportWithRetry(results);
+
+    return { active, batchEmpty: false };
 }
 
-async function runAgentCycle(): Promise<void> {
-    console.log("[agent] Запрашиваем непроверенные прокси...");
+// ─── Основной цикл ────────────────────────────────────────────────────────────
 
+async function runAgentCycle(): Promise<void> {
     let totalActive = 0;
     let round = 0;
-    const MAX_ROUNDS = 50;
 
     while (totalActive < MIN_ACTIVE && round < MAX_ROUNDS) {
         round++;
-        const found = await checkBatch();
-        totalActive += found;
-        console.log(`[agent] Раунд ${round}: найдено активных ${found}, всего: ${totalActive}/${MIN_ACTIVE}`);
+        const { active, batchEmpty } = await checkBatch();
+        totalActive += active;
 
         if (totalActive >= MIN_ACTIVE) {
-            console.log(`[agent] Достигнут минимум ${MIN_ACTIVE} активных прокси.`);
+            console.log(`[agent] Достигнут минимум ${MIN_ACTIVE} активных за ${round} раундов.`);
             break;
         }
 
-        if (found === 0) {
-            // Непроверенных нет — просим скрапер добавить новых и ждём
-            console.log("[agent] Непроверенных нет, запрашиваем повторный скрапинг...");
-            try {
-                await apiRequest("POST", "/rescrape");
-                // Ждём 30 сек пока скрапер отработает
-                await new Promise(r => setTimeout(r, 30_000));
-            } catch {
-                console.error("[agent] Не удалось запросить скрапинг, ждём 30 сек...");
-                await new Promise(r => setTimeout(r, 30_000));
-            }
+        if (batchEmpty) {
+            // Непроверенных нет — просим скрапинг и ждём
+            console.log("[agent] Непроверенных нет, запрашиваем скрапинг...");
+            try { await apiRequest("POST", "/rescrape"); } catch { /* ignore */ }
+            await sleep(30_000);
         }
     }
 
     if (totalActive < MIN_ACTIVE) {
-        console.log(`[agent] Предупреждение: найдено только ${totalActive}/${MIN_ACTIVE} активных прокси после ${round} раундов.`);
+        console.log(`[agent] Найдено ${totalActive}/${MIN_ACTIVE} активных после ${round} раундов.`);
     }
 }
+
+// ─── Health-check HTTP сервер ─────────────────────────────────────────────────
+
+const HEALTH_PORT = Number(process.env["HEALTH_PORT"] ?? 3001);
+http.createServer((req, res) => {
+    if (req.url === "/ping") { res.writeHead(200).end("ok"); return; }
+    res.writeHead(404).end();
+}).listen(HEALTH_PORT, () => {
+    console.log(`[agent] Health-check доступен на порту ${HEALTH_PORT} (/ping)`);
+});
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 

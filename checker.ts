@@ -84,6 +84,6 @@ export async function runChecker(): Promise<void> {
     for (let i = 0; i < batch.length; i += CONCURRENCY) {
         await Promise.allSettled(batch.slice(i, i + CONCURRENCY).map(checkOne));
     }
-    proxies.deleteDead();
-    console.log(`[checker] Готово. Активных: ${proxies.countByStatus("active")}, медленных: ${proxies.countByStatus("slow")}`);
+    const deleted = proxies.deleteDead();
+    console.log(`[checker] Готово. Активных: ${proxies.countByStatus("active")}, медленных: ${proxies.countByStatus("slow")}, удалено мёртвых: ${deleted}`);
 }

@@ -159,7 +159,10 @@ export const proxies = {
         stmtSetStatus.run({ id, status, ping_ms }),
     setCountry: (id: number, country: string) =>
         stmtSetCountry.run({ id, country }),
-    deleteDead: () => stmtDeleteDead.run(),
+    deleteDead: () => {
+        const result = stmtDeleteDead.run();
+        return result.changes;
+    },
     countByStatus: (status: string): number =>
         stmtCountByStatus.get(status)?.count ?? 0,
 };
