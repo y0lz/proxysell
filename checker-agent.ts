@@ -49,7 +49,7 @@ function apiRequest<T>(method: string, path: string, body?: unknown): Promise<T>
                     "Content-Type": "application/json",
                     ...(bodyStr ? { "Content-Length": Buffer.byteLength(bodyStr) } : {}),
                 },
-                timeout: 15_000,
+                timeout: 30_000,
             },
             (res) => {
                 let data = "";

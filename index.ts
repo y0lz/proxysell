@@ -45,17 +45,20 @@ const server = http.createServer((req, res) => {
         let body = "";
         req.on("data", chunk => { body += chunk; });
         req.on("end", () => {
-            try {
-                const results = JSON.parse(body) as CheckResult[];
-                for (const r of results) {
-                    proxies.setStatus(r.id, r.status, r.ping_ms);
-                    if (r.country) proxies.setCountry(r.id, r.country);
+            // Отвечаем сразу, обрабатываем асинхронно
+            res.writeHead(200).end(JSON.stringify({ ok: true }));
+            setImmediate(() => {
+                try {
+                    const results = JSON.parse(body) as CheckResult[];
+                    for (const r of results) {
+                        proxies.setStatus(r.id, r.status, r.ping_ms);
+                        if (r.country) proxies.setCountry(r.id, r.country);
+                    }
+                    console.log(`[api] RU-агент прислал ${results.length} результатов`);
+                } catch {
+                    console.error("[api] Ошибка парсинга результатов");
                 }
-                console.log(`[api] RU-агент прислал ${results.length} результатов`);
-                res.writeHead(200).end(JSON.stringify({ ok: true }));
-            } catch {
-                res.writeHead(400).end("Bad JSON");
-            }
+            });
         });
         return;
     }
