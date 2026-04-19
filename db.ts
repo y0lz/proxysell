@@ -20,6 +20,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id        INTEGER PRIMARY KEY,   -- Telegram user_id
     is_vip    INTEGER NOT NULL DEFAULT 0,
+    vip_until TEXT,                  -- ISO-8601, до какого времени активен VIP
     last_free TEXT,                  -- ISO-8601 datetime
     joined_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -34,11 +35,15 @@ db.exec(`
   );
 `);
 
+// Миграция: добавляем vip_until если колонки ещё нет (для существующих БД)
+try { db.exec(`ALTER TABLE users ADD COLUMN vip_until TEXT`); } catch { /* уже есть */ }
+
 // ─── Типы ─────────────────────────────────────────────────────────────────────
 
 export interface User {
     id: number;
     is_vip: number;
+    vip_until: string | null;
     last_free: string | null;
     joined_at: string;
 }
@@ -68,14 +73,24 @@ const stmtSetLastFree = db.prepare(`
 `);
 
 const stmtSetVip = db.prepare(`
-  UPDATE users SET is_vip = 1 WHERE id = ?
+  UPDATE users SET is_vip = 1, vip_until = @vip_until WHERE id = @id
+`);
+
+const stmtExpireVip = db.prepare(`
+  UPDATE users SET is_vip = 0, vip_until = NULL
+  WHERE vip_until IS NOT NULL AND vip_until < datetime('now')
 `);
 
 export const users = {
     upsert: (id: number) => stmtUpsertUser.run({ id }),
     get: (id: number): User | undefined => stmtGetUser.get(id),
     setLastFree: (id: number) => stmtSetLastFree.run(id),
-    setVip: (id: number) => stmtSetVip.run(id),
+    // daysCount — сколько дней VIP (1, 7, 30 и т.д.)
+    setVip: (id: number, daysCount: number) => {
+        const vip_until = new Date(Date.now() + daysCount * 86400_000).toISOString();
+        stmtSetVip.run({ id, vip_until });
+    },
+    expireVip: () => stmtExpireVip.run(),
 };
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
