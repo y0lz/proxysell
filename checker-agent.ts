@@ -98,13 +98,22 @@ function parseMtproto(link: string) {
 
 function checkSocks5(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
-        const agent = new SocksProxyAgent(`socks5://${host}:${port}`, { timeout: TIMEOUT_MS });
+        const agent = new SocksProxyAgent(`socks5://${host}:${port}`);
         const start = Date.now();
+        let done = false;
+
+        // Страховочный таймаут — socks-proxy-agent иногда игнорирует timeout опцию
+        const timer = setTimeout(() => {
+            if (!done) { done = true; req.destroy(); reject(new Error("timeout")); }
+        }, TIMEOUT_MS);
+
         const req = https.get(
-            { hostname: "api.telegram.org", port: 443, path: "/", agent, timeout: TIMEOUT_MS },
+            { hostname: "api.telegram.org", port: 443, path: "/", agent },
             (res) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
                 res.resume();
-                // 200, 302, 404 — прокси живой, сервер ответил
                 if (res.statusCode && res.statusCode < 500) {
                     resolve(Date.now() - start);
                 } else {
@@ -112,8 +121,8 @@ function checkSocks5(host: string, port: number): Promise<number> {
                 }
             }
         );
-        req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-        req.on("error", reject);
+        req.on("timeout", () => { if (!done) { done = true; clearTimeout(timer); req.destroy(); reject(new Error("timeout")); } });
+        req.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
     });
 }
 
