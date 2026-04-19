@@ -14,7 +14,7 @@ const MIN_ACTIVE_MT = 10;  // минимум активных MTProto
 const MIN_ACTIVE_S5 = 10;  // минимум активных SOCKS5
 const MAX_ROUNDS    = 200;
 
-const HEALTH_PORT = Number(process.env["HEALTH_PORT"] ?? 3001);interface ProxyRow {
+interface ProxyRow {
     id: number; type: string; link: string;
     status: string; ping_ms: number | null; country: string | null;
 }
@@ -233,11 +233,48 @@ async function runAgentCycle(): Promise<void> {
     }
 }
 
-// ─── Health-check HTTP сервер ─────────────────────────────────────────────────
+// ─── Health-check + restart HTTP сервер ──────────────────────────────────────
 
-const HEALTH_PORT = Number(process.env["HEALTH_PORT"] ?? 3001);
+const HEALTH_PORT  = Number(process.env["HEALTH_PORT"]  ?? 3001);
+const MAIN_API_URL = process.env["MAIN_SERVER_URL"]     ?? "";
+
 http.createServer((req, res) => {
-    if (req.url === "/ping") { res.writeHead(200).end("ok"); return; }
+    const auth = req.headers["x-api-secret"];
+    if (req.url !== "/ping" && (!API_SECRET || auth !== API_SECRET)) {
+        res.writeHead(401).end("Unauthorized");
+        return;
+    }
+
+    if (req.url === "/ping") {
+        res.writeHead(200).end("ok");
+        return;
+    }
+
+    // POST /restart — перезапустить агент (PM2 поднимет)
+    if (req.method === "POST" && req.url === "/restart") {
+        console.log("[agent] Получен запрос на перезапуск...");
+        res.writeHead(200).end(JSON.stringify({ ok: true }));
+        setTimeout(() => process.exit(0), 300);
+        return;
+    }
+
+    // POST /restart-peer — перезапустить NL сервер
+    if (req.method === "POST" && req.url === "/restart-peer") {
+        console.log("[agent] Отправляем команду перезапуска NL серверу...");
+        res.writeHead(200).end(JSON.stringify({ ok: true }));
+        if (MAIN_API_URL) {
+            const url = new URL(MAIN_API_URL + "/restart");
+            const req2 = http.request(
+                { hostname: url.hostname, port: url.port, path: "/restart", method: "POST",
+                  headers: { "x-api-secret": API_SECRET }, timeout: 5_000 },
+                (r) => { r.resume(); console.log(`[agent] NL перезапущен, статус: ${r.statusCode}`); }
+            );
+            req2.on("error", (e) => console.error("[agent] Ошибка:", e.message));
+            req2.end();
+        }
+        return;
+    }
+
     res.writeHead(404).end();
 }).listen(HEALTH_PORT, () => {
     console.log(`[agent] Health-check доступен на порту ${HEALTH_PORT} (/ping)`);
