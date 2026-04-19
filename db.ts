@@ -115,7 +115,7 @@ const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
 `);
 
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
-  SELECT * FROM proxies WHERE status = 'unchecked' LIMIT 100
+  SELECT * FROM proxies WHERE status = 'unchecked' LIMIT 500
 `);
 
 const stmtSetStatus = db.prepare(`

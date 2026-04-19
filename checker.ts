@@ -6,9 +6,9 @@ import { proxies } from "./db.js";
 import type { Proxy } from "./db.js";
 
 const TIMEOUT_MS = 6_000;
-const CONCURRENCY = 40;
-// Лёгкий эндпоинт Telegram — просто проверяем TCP/TLS доступность
-const CHECK_HOST = "api.telegram.org";
+const CONCURRENCY = 100;
+// Проверяем через google — нейтральный хост, не блокирует публичные прокси
+const CHECK_HOST = "www.google.com";
 const CHECK_PORT = 443;
 
 // ─── Парсеры ссылок ───────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ async function checkOne(proxy: Proxy): Promise<void> {
             ping = await checkMtproto(addr.host, addr.port);
         }
 
-        const status = ping <= 1500 ? "active" : "slow";
+        const status = ping <= 3000 ? "active" : "slow";
         proxies.setStatus(proxy.id, status, ping);
     } catch {
         proxies.setStatus(proxy.id, "dead", null);
