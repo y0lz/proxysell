@@ -92,6 +92,13 @@ const stmtGetFastActive = db.prepare<[], Proxy>(`
   LIMIT 1
 `);
 
+const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
+  SELECT * FROM proxies
+  WHERE status = 'active' AND type = ?
+  ORDER BY ping_ms ASC
+  LIMIT 1
+`);
+
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
   SELECT * FROM proxies WHERE status = 'unchecked' LIMIT 100
 `);
@@ -116,6 +123,7 @@ export const proxies = {
     insert: (type: string, link: string) =>
         stmtInsertProxy.run({ type, link, status: "unchecked" }),
     getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
+    getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
     setStatus: (id: number, status: string, ping_ms: number | null) =>
         stmtSetStatus.run({ id, status, ping_ms }),

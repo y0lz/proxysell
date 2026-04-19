@@ -21,6 +21,7 @@ bot.command("start", async (ctx) => {
     );
 });
 
+// Шаг 1 — выбор типа прокси
 bot.callbackQuery("get_free", async (ctx) => {
     const userId = ctx.from.id;
     const user = users.get(userId);
@@ -36,10 +37,29 @@ bot.callbackQuery("get_free", async (ctx) => {
         });
     }
 
-    const proxy = proxies.getFastActive();
+    await ctx.answerCallbackQuery();
+
+    const keyboard = new InlineKeyboard()
+        .text("🔵 MTProto", "proxy_MTPROTO")
+        .text("🟠 SOCKS5", "proxy_SOCKS5");
+
+    await ctx.reply(
+        "Выберите тип прокси:\n\n" +
+        "🔵 *MTProto* — встроен в Telegram, сложнее заблокировать\n" +
+        "🟠 *SOCKS5* — работает для всего трафика",
+        { parse_mode: "Markdown", reply_markup: keyboard }
+    );
+});
+
+// Шаг 2 — выдача прокси нужного типа
+bot.callbackQuery(/^proxy_(MTPROTO|SOCKS5)$/, async (ctx) => {
+    const userId = ctx.from.id;
+    const type = ctx.match[1] as string;
+
+    const proxy = proxies.getFastActiveByType(type);
     if (!proxy) {
         return ctx.answerCallbackQuery({
-            text: "😔 База прокси сейчас пуста. Идёт обновление, попробуйте позже.",
+            text: `😔 Нет активных ${type} прокси. Попробуйте другой тип или зайдите позже.`,
             show_alert: true,
         });
     }
@@ -47,7 +67,7 @@ bot.callbackQuery("get_free", async (ctx) => {
     users.setLastFree(userId);
 
     await ctx.reply(
-        `✅ Ваш прокси (${proxy.type}):\n\n\`${proxy.link}\`\n\nНажмите на ссылку, чтобы применить.`,
+        `✅ Ваш ${proxy.type} прокси:\n\n\`${proxy.link}\`\n\nНажмите на ссылку, чтобы применить в Telegram.`,
         { parse_mode: "Markdown" }
     );
     await ctx.answerCallbackQuery();
@@ -62,8 +82,8 @@ bot.callbackQuery("help", async (ctx) => {
     await ctx.answerCallbackQuery();
     await ctx.reply(
         "📖 *Как настроить прокси:*\n\n" +
-        "*MTProto* — встроен в Telegram\\. Нажмите на ссылку `tg://proxy` — Telegram предложит применить автоматически\\.\n\n" +
-        "*SOCKS5* — работает для всего трафика\\. Нажмите на ссылку `tg://socks` — применится аналогично\\.\n\n" +
+        "*MTProto* — встроен в Telegram\\. Нажмите на ссылку — Telegram предложит применить автоматически\\.\n\n" +
+        "*SOCKS5* — работает для всего трафика\\. Нажмите на ссылку — применится аналогично\\.\n\n" +
         "MTProto сложнее заблокировать через DPI, SOCKS5 универсальнее\\.",
         { parse_mode: "MarkdownV2" }
     );
