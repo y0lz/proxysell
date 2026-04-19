@@ -1,4 +1,4 @@
-// index.ts — основной сервер (NL): бот + скрапер + HTTP API для RU-агента
+// index.ts — основной сервер (NL)
 import "dotenv/config";
 import http from "node:http";
 import { scrapeProxies } from "./scraper.js";
@@ -8,6 +8,7 @@ import { users, proxies } from "./db.js";
 
 const API_PORT   = Number(process.env["API_PORT"]   ?? 3000);
 const API_SECRET = process.env["API_SECRET"]        ?? "";
+const MIN_ACTIVE = 10; // минимум активных прокси перед стандартным режимом
 
 interface CheckResult {
     id: number;
@@ -25,7 +26,6 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // GET /unchecked — отдаём агенту список непроверенных прокси
     if (req.method === "GET" && req.url === "/unchecked") {
         const batch = proxies.getUnchecked();
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -33,7 +33,6 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // POST /report — принимаем результаты проверки от агента
     if (req.method === "POST" && req.url === "/report") {
         let body = "";
         req.on("data", chunk => { body += chunk; });
@@ -60,14 +59,38 @@ server.listen(API_PORT, () => {
     console.log(`[api] HTTP API запущен на порту ${API_PORT}`);
 });
 
-// ─── Планировщики ─────────────────────────────────────────────────────────────
+// ─── Запуск бота сразу ────────────────────────────────────────────────────────
 
-await scrapeProxies();
-await runChecker(); // локальный чекер как fallback пока нет RU-агента
+console.log("Запуск бота...");
+bot.start();
+
+// ─── Фоновая инициализация ────────────────────────────────────────────────────
+
+async function bootstrap(): Promise<void> {
+    await scrapeProxies();
+
+    // Крутим локальный чекер пока не наберём MIN_ACTIVE
+    let active = proxies.countByStatus("active");
+    console.log(`[init] Активных прокси в базе: ${active}`);
+
+    while (active < MIN_ACTIVE) {
+        console.log(`[init] Мало активных (${active}/${MIN_ACTIVE}), запускаем ещё раунд проверки...`);
+        await runChecker();
+        active = proxies.countByStatus("active");
+        if (active < MIN_ACTIVE && proxies.getUnchecked().length === 0) {
+            // Все проверены но мало активных — скрапим заново
+            console.log("[init] Непроверенных нет, повторный скрапинг...");
+            await scrapeProxies();
+        }
+    }
+
+    console.log(`[init] Готово. Активных прокси: ${active}`);
+}
+
+void bootstrap();
+
+// ─── Планировщики ─────────────────────────────────────────────────────────────
 
 setInterval(() => { void scrapeProxies(); }, 3 * 60 * 60 * 1000);
 setInterval(() => { void runChecker(); },   30 * 60 * 1000);
 setInterval(() => { users.expireVip(); },   60 * 60 * 1000);
-
-console.log("Запуск бота...");
-bot.start();

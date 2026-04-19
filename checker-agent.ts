@@ -8,8 +8,9 @@ import { SocksProxyAgent } from "socks-proxy-agent";
 const MAIN_SERVER = process.env["MAIN_SERVER_URL"] ?? "";
 const API_SECRET  = process.env["API_SECRET"]      ?? "";
 const TIMEOUT_MS  = 6_000;
-const CONCURRENCY = 50;
+const CONCURRENCY = 100; // увеличено для быстрого старта
 const INTERVAL_MS = 5 * 60 * 1000;
+const MIN_ACTIVE  = 10;
 
 const TELEGRAM_DCS = [
     { host: "149.154.175.53",  port: 443 },
@@ -129,17 +130,16 @@ async function checkOne(proxy: ProxyRow): Promise<CheckResult> {
 
 // ─── Основной цикл ────────────────────────────────────────────────────────────
 
-async function runAgentCycle(): Promise<void> {
-    console.log("[agent] Запрашиваем непроверенные прокси...");
+async function checkBatch(): Promise<number> {
     let batch: ProxyRow[];
     try {
         batch = await apiRequest<ProxyRow[]>("GET", "/unchecked");
     } catch (err) {
         console.error("[agent] Не удалось получить прокси:", err);
-        return;
+        return 0;
     }
 
-    if (batch.length === 0) { console.log("[agent] Нет непроверенных прокси."); return; }
+    if (batch.length === 0) { console.log("[agent] Нет непроверенных прокси."); return 0; }
 
     console.log(`[agent] Проверяем ${batch.length} прокси из РФ...`);
 
@@ -152,13 +152,33 @@ async function runAgentCycle(): Promise<void> {
         }
     }
 
+    const active = results.filter(r => r.status === "active").length;
+    const dead   = results.filter(r => r.status === "dead").length;
+
     try {
         await apiRequest("POST", "/report", results);
-        const active = results.filter(r => r.status === "active").length;
-        const dead   = results.filter(r => r.status === "dead").length;
         console.log(`[agent] Отправлено: активных ${active}, мёртвых ${dead}`);
     } catch (err) {
         console.error("[agent] Не удалось отправить результаты:", err);
+    }
+
+    return active;
+}
+
+async function runAgentCycle(): Promise<void> {
+    console.log("[agent] Запрашиваем непроверенные прокси...");
+    const active = await checkBatch();
+
+    // Если активных мало — крутим ещё раунды не дожидаясь таймера
+    if (active < MIN_ACTIVE) {
+        console.log(`[agent] Активных ${active}/${MIN_ACTIVE}, продолжаем проверку...`);
+        let total = active;
+        while (total < MIN_ACTIVE) {
+            const found = await checkBatch();
+            total += found;
+            if (found === 0) break; // непроверенных больше нет
+        }
+        console.log(`[agent] Итого активных найдено: ${total}`);
     }
 }
 
