@@ -19,6 +19,11 @@ const SOURCES = [
         type: "MTPROTO" as const,
         parse: parseMtproto,
     },
+    {
+        url: "https://raw.githubusercontent.com/hookzof/socks5_list/master/tg/mtproto.txt",
+        type: "MTPROTO" as const,
+        parse: parseMtproto,
+    },
     // ── SOCKS5 ───────────────────────────────────────────────────────────────
     {
         url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
