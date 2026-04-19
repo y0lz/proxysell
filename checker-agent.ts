@@ -126,25 +126,12 @@ function checkSocks5(host: string, port: number): Promise<number> {
     });
 }
 
-// MTProto: TCP + отправляем 16 случайных байт и ждём хоть какой-то ответ
-// Это лучше чем просто connect — мёртвые прокси закроют соединение сразу
+// MTProto: простой TCP connect — если порт открыт, прокси живой
 function checkMtproto(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
         const start = Date.now();
         const socket = net.createConnection({ host, port, timeout: TIMEOUT_MS });
-        socket.on("connect", () => {
-            // Шлём случайные байты — живой MTProto прокси не закроет соединение сразу
-            socket.write(Buffer.from(Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))));
-        });
-        // Любой ответ = прокси живой и реагирует
-        socket.on("data", () => {
-            socket.destroy();
-            resolve(Date.now() - start);
-        });
-        // Если закрыл без ответа — мёртвый
-        socket.on("close", (hadError) => {
-            if (!hadError) reject(new Error("closed without response"));
-        });
+        socket.on("connect", () => { socket.destroy(); resolve(Date.now() - start); });
         socket.on("timeout", () => { socket.destroy(); reject(new Error("timeout")); });
         socket.on("error", reject);
     });
