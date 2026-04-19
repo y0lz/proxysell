@@ -122,7 +122,9 @@ const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
 `);
 
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
-  SELECT * FROM proxies WHERE status = 'unchecked' LIMIT 100
+  SELECT * FROM proxies WHERE status = 'unchecked'
+  ORDER BY CASE type WHEN 'MTPROTO' THEN 0 ELSE 1 END
+  LIMIT 100
 `);
 
 const stmtSetStatus = db.prepare(`

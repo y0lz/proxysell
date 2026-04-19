@@ -10,8 +10,9 @@ const API_SECRET  = process.env["API_SECRET"]      ?? "";
 const TIMEOUT_MS  = 6_000;
 const CONCURRENCY = 100;
 const INTERVAL_MS = 5 * 60 * 1000;
-const MIN_ACTIVE  = 10;
-const MAX_ROUNDS  = 50;
+const MIN_ACTIVE_MT = 10;  // минимум активных MTProto
+const MIN_ACTIVE_S5 = 10;  // минимум активных SOCKS5
+const MAX_ROUNDS    = 200;
 
 const TELEGRAM_DCS = [
     { host: "149.154.175.53",  port: 443 },
@@ -161,19 +162,19 @@ async function checkOne(proxy: ProxyRow): Promise<CheckResult> {
 
 // ─── Батч-проверка ────────────────────────────────────────────────────────────
 
-// Возвращает { active, batchEmpty }
-async function checkBatch(): Promise<{ active: number; batchEmpty: boolean }> {
+// Возвращает { activeMt, activeS5, batchEmpty }
+async function checkBatch(): Promise<{ activeMt: number; activeS5: number; batchEmpty: boolean }> {
     let batch: ProxyRow[];
     try {
         batch = await apiRequest<ProxyRow[]>("GET", "/unchecked");
     } catch (err) {
         console.error("[agent] Не удалось получить прокси:", err);
-        return { active: 0, batchEmpty: false };
+        return { activeMt: 0, activeS5: 0, batchEmpty: false };
     }
 
     if (batch.length === 0) {
         console.log("[agent] Нет непроверенных прокси.");
-        return { active: 0, batchEmpty: true };
+        return { activeMt: 0, activeS5: 0, batchEmpty: true };
     }
 
     const mtTotal = batch.filter(p => p.type === "MTPROTO").length;
@@ -189,45 +190,47 @@ async function checkBatch(): Promise<{ active: number; batchEmpty: boolean }> {
         }
     }
 
-    const active   = results.filter(r => r.status === "active").length;
+    const activeMt = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "MTPROTO").length;
+    const activeS5 = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "SOCKS5").length;
     const slow     = results.filter(r => r.status === "slow").length;
     const dead     = results.filter(r => r.status === "dead").length;
-    const mtActive = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "MTPROTO").length;
-    const s5Active = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "SOCKS5").length;
 
-    console.log(`[agent] Результат: MTProto активных ${mtActive}/${mtTotal}, SOCKS5 активных ${s5Active}/${s5Total}, медленных: ${slow}, мёртвых: ${dead}`);
+    console.log(`[agent] Результат: MTProto активных ${activeMt}/${mtTotal}, SOCKS5 активных ${activeS5}/${s5Total}, медленных: ${slow}, мёртвых: ${dead}`);
 
     await reportWithRetry(results);
 
-    return { active, batchEmpty: false };
+    return { activeMt, activeS5, batchEmpty: false };
 }
 
 // ─── Основной цикл ────────────────────────────────────────────────────────────
 
 async function runAgentCycle(): Promise<void> {
-    let totalActive = 0;
+    let totalMt = 0;
+    let totalS5 = 0;
     let round = 0;
 
-    while (totalActive < MIN_ACTIVE && round < MAX_ROUNDS) {
+    while ((totalMt < MIN_ACTIVE_MT || totalS5 < MIN_ACTIVE_S5) && round < MAX_ROUNDS) {
         round++;
-        const { active, batchEmpty } = await checkBatch();
-        totalActive += active;
+        const { activeMt, activeS5, batchEmpty } = await checkBatch();
+        totalMt += activeMt;
+        totalS5 += activeS5;
 
-        if (totalActive >= MIN_ACTIVE) {
-            console.log(`[agent] Достигнут минимум ${MIN_ACTIVE} активных за ${round} раундов.`);
+        console.log(`[agent] Раунд ${round}: MTProto ${totalMt}/${MIN_ACTIVE_MT}, SOCKS5 ${totalS5}/${MIN_ACTIVE_S5}`);
+
+        if (totalMt >= MIN_ACTIVE_MT && totalS5 >= MIN_ACTIVE_S5) {
+            console.log(`[agent] Достигнут минимум по обоим типам за ${round} раундов.`);
             break;
         }
 
         if (batchEmpty) {
-            // Непроверенных нет — просим скрапинг и ждём
             console.log("[agent] Непроверенных нет, запрашиваем скрапинг...");
             try { await apiRequest("POST", "/rescrape"); } catch { /* ignore */ }
             await sleep(30_000);
         }
     }
 
-    if (totalActive < MIN_ACTIVE) {
-        console.log(`[agent] Найдено ${totalActive}/${MIN_ACTIVE} активных после ${round} раундов.`);
+    if (totalMt < MIN_ACTIVE_MT || totalS5 < MIN_ACTIVE_S5) {
+        console.log(`[agent] После ${round} раундов: MTProto ${totalMt}/${MIN_ACTIVE_MT}, SOCKS5 ${totalS5}/${MIN_ACTIVE_S5}`);
     }
 }
 
