@@ -18,25 +18,26 @@ db.pragma("journal_mode = WAL");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    id        INTEGER PRIMARY KEY,   -- Telegram user_id
+    id        INTEGER PRIMARY KEY,
     is_vip    INTEGER NOT NULL DEFAULT 0,
-    vip_until TEXT,                  -- ISO-8601, до какого времени активен VIP
-    last_free TEXT,                  -- ISO-8601 datetime
+    vip_until TEXT,
+    last_free TEXT,
     joined_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS proxies (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    type       TEXT NOT NULL,        -- 'MTPROTO' | 'SOCKS5'
+    type       TEXT NOT NULL,
     link       TEXT NOT NULL UNIQUE,
-    status     TEXT NOT NULL DEFAULT 'unchecked', -- 'active' | 'dead' | 'unchecked'
+    status     TEXT NOT NULL DEFAULT 'unchecked',
     ping_ms    INTEGER,
+    country    TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
 
-// Миграция: добавляем vip_until если колонки ещё нет (для существующих БД)
 try { db.exec(`ALTER TABLE users ADD COLUMN vip_until TEXT`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE proxies ADD COLUMN country TEXT`); } catch { /* уже есть */ }
 
 // ─── Типы ─────────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ export interface Proxy {
     link: string;
     status: string;
     ping_ms: number | null;
+    country: string | null;
     updated_at: string;
 }
 
@@ -100,9 +102,13 @@ const stmtInsertProxy = db.prepare(`
   VALUES (@type, @link, @status)
 `);
 
+// Страны СНГ/РФ — прокси из них скорее всего заблокированы РКН
+const BLOCKED_COUNTRIES = new Set(["RU", "BY", "KZ", "UZ", "TM", "TJ", "AZ", "AM", "KG"]);
+
 const stmtGetFastActive = db.prepare<[], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active'
+    AND (country IS NULL OR country NOT IN (${[...BLOCKED_COUNTRIES].map(() => "?").join(",")}))
   ORDER BY ping_ms ASC
   LIMIT 1
 `);
@@ -110,6 +116,7 @@ const stmtGetFastActive = db.prepare<[], Proxy>(`
 const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active' AND type = ?
+    AND (country IS NULL OR country NOT IN (${[...BLOCKED_COUNTRIES].map(() => "?").join(",")}))
   ORDER BY ping_ms ASC
   LIMIT 1
 `);
@@ -124,6 +131,10 @@ const stmtSetStatus = db.prepare(`
   WHERE id = @id
 `);
 
+const stmtSetCountry = db.prepare(`
+  UPDATE proxies SET country = @country WHERE id = @id
+`);
+
 const stmtDeleteDead = db.prepare(`
   DELETE FROM proxies
   WHERE status = 'dead'
@@ -134,14 +145,20 @@ const stmtCountByStatus = db.prepare<[string], { count: number }>(`
   SELECT COUNT(*) as count FROM proxies WHERE status = ?
 `);
 
+const blockedList = [...BLOCKED_COUNTRIES];
+
 export const proxies = {
     insert: (type: string, link: string) =>
         stmtInsertProxy.run({ type, link, status: "unchecked" }),
-    getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
-    getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
+    getFastActive: (): Proxy | undefined =>
+        stmtGetFastActive.get(...blockedList as [string]),
+    getFastActiveByType: (type: string): Proxy | undefined =>
+        stmtGetFastActiveByType.get(type, ...blockedList as [string]),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
     setStatus: (id: number, status: string, ping_ms: number | null) =>
         stmtSetStatus.run({ id, status, ping_ms }),
+    setCountry: (id: number, country: string) =>
+        stmtSetCountry.run({ id, country }),
     deleteDead: () => stmtDeleteDead.run(),
     countByStatus: (status: string): number =>
         stmtCountByStatus.get(status)?.count ?? 0,
