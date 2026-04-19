@@ -6,39 +6,54 @@ export const SOURCES: Array<{
     name: string;
     url: string;
     type: "MTPROTO" | "SOCKS5";
+    parser: "tme_proxy" | "tme_raw_fields" | "toproxylab_socks5";
 }> = [
-    { name: "mtpro_xyz",      url: "https://t.me/s/mtpro_xyz",      type: "MTPROTO" },
-    { name: "proxyListFree",  url: "https://t.me/s/proxyListFree",  type: "MTPROTO" },
+    { name: "mtpro_xyz",     url: "https://t.me/s/mtpro_xyz",     type: "MTPROTO", parser: "tme_proxy" },
+    { name: "proxyListFree", url: "https://t.me/s/proxyListFree", type: "MTPROTO", parser: "tme_proxy" },
+    { name: "mtrproxytg",    url: "https://t.me/s/mtrproxytg",    type: "MTPROTO", parser: "tme_raw_fields" },
+    { name: "toproxylab",    url: "https://t.me/s/toproxylab",    type: "SOCKS5",  parser: "toproxylab_socks5" },
 ];
 
 const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 };
 
-// https://t.me/proxy?server=...&port=...&secret=... → tg://proxy?...
-function parseHtml(html: string, type: "MTPROTO" | "SOCKS5"): string[] {
+// tg://proxy?server=...&port=...&secret=... из href ссылок
+function parseTmeProxy(html: string): string[] {
     const result: string[] = [];
+    const matches = html.matchAll(/https:\/\/t\.me\/proxy\?([^"'\s<>]+)/g);
+    for (const m of matches) {
+        const params = m[1]!.replace(/&amp;amp;/g, "&").replace(/&amp;/g, "&");
+        if (params.includes("secret=")) result.push(`tg://proxy?${params}`);
+    }
+    return result;
+}
 
-    if (type === "MTPROTO") {
-        const matches = html.matchAll(/https:\/\/t\.me\/proxy\?([^"'\s<>]+)/g);
-        for (const m of matches) {
-            const params = m[1]!.replace(/&amp;amp;/g, "&").replace(/&amp;/g, "&");
-            if (params.includes("secret=")) {
-                result.push(`tg://proxy?${params}`);
-            }
+// Server: X / Port: Y / Secret: Z из текста постов @mtrproxytg
+function parseTmeRawFields(html: string): string[] {
+    const result: string[] = [];
+    const blocks = html.matchAll(/Server:\s*([^\s<]+)[\s\S]*?Port:\s*(\d+)[\s\S]*?Secret:\s*([a-fA-F0-9]+)/g);
+    for (const m of blocks) {
+        const [, server, port, secret] = m;
+        if (server && port && secret) {
+            result.push(`tg://proxy?server=${server}&port=${port}&secret=${secret}`);
         }
     }
+    return result;
+}
 
-    if (type === "SOCKS5") {
-        const matches = html.matchAll(/https:\/\/t\.me\/socks\?([^"'\s<>]+)/g);
+// IP:PORT из текста постов @toproxylab (SOCKS5 секция)
+function parseTopProxyLabSocks5(html: string): string[] {
+    const result: string[] = [];
+    // Ищем паттерн IP:PORT после "SOCKS5" в тексте
+    const sections = html.split(/SOCKS5/i);
+    for (let i = 1; i < sections.length; i++) {
+        const section = sections[i]!.slice(0, 500); // берём только начало секции
+        const matches = section.matchAll(/(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})/g);
         for (const m of matches) {
-            const params = m[1]!.replace(/&amp;amp;/g, "&").replace(/&amp;/g, "&");
-            if (params.includes("server=")) {
-                result.push(`tg://socks?${params}`);
-            }
+            result.push(`tg://socks?server=${m[1]}&port=${m[2]}`);
         }
     }
-
     return result;
 }
 
@@ -46,7 +61,12 @@ function parseHtml(html: string, type: "MTPROTO" | "SOCKS5"): string[] {
 export async function scrapeSource(source: typeof SOURCES[number]): Promise<number> {
     try {
         const { data } = await axios.get<string>(source.url, { timeout: 10_000, headers: HEADERS });
-        const links = parseHtml(data, source.type);
+
+        let links: string[] = [];
+        if (source.parser === "tme_proxy")           links = parseTmeProxy(data);
+        else if (source.parser === "tme_raw_fields") links = parseTmeRawFields(data);
+        else if (source.parser === "toproxylab_socks5") links = parseTopProxyLabSocks5(data);
+
         let count = 0;
         for (const link of links) {
             proxies.insert(source.type, link);
