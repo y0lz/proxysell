@@ -1,7 +1,7 @@
 // index.ts — основной сервер (NL)
 import "dotenv/config";
 import http from "node:http";
-import { scrapeProxies } from "./scraper.js";
+import { scrapeProxies, scrapeSource, SOURCES } from "./scraper.js";
 import { runChecker } from "./checker.js";
 import { bot } from "./bot.js";
 import { users, proxies } from "./db.js";
@@ -45,7 +45,13 @@ const SCRAPE_COOLDOWN = 10 * 60 * 1000; // не чаще раза в 10 мину
         }
         lastScrapeTime = now;
         console.log("[api] Агент запросил повторный скрапинг...");
-        void scrapeProxies();
+        // Скрапим по одному источнику — после каждого агент сразу получит новые unchecked
+        void (async () => {
+            proxies.resetDeadMtproto();
+            for (const source of SOURCES) {
+                await scrapeSource(source);
+            }
+        })();
         res.writeHead(200).end(JSON.stringify({ ok: true }));
         return;
     }
