@@ -33,6 +33,14 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // POST /rescrape — агент просит запустить скрапер заново
+    if (req.method === "POST" && req.url === "/rescrape") {
+        console.log("[api] Агент запросил повторный скрапинг...");
+        void scrapeProxies();
+        res.writeHead(200).end(JSON.stringify({ ok: true }));
+        return;
+    }
+
     if (req.method === "POST" && req.url === "/report") {
         let body = "";
         req.on("data", chunk => { body += chunk; });

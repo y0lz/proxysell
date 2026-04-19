@@ -175,22 +175,35 @@ async function runAgentCycle(): Promise<void> {
 
     let totalActive = 0;
     let round = 0;
-    const MAX_ROUNDS = 30;
+    const MAX_ROUNDS = 50;
 
     while (totalActive < MIN_ACTIVE && round < MAX_ROUNDS) {
         round++;
         const found = await checkBatch();
         totalActive += found;
         console.log(`[agent] Раунд ${round}: найдено активных ${found}, всего: ${totalActive}/${MIN_ACTIVE}`);
-        if (found === 0 && totalActive < MIN_ACTIVE) {
-            // Непроверенных больше нет — выходим
-            console.log("[agent] Непроверенных прокси больше нет.");
-            break;
-        }
+
         if (totalActive >= MIN_ACTIVE) {
             console.log(`[agent] Достигнут минимум ${MIN_ACTIVE} активных прокси.`);
             break;
         }
+
+        if (found === 0) {
+            // Непроверенных нет — просим скрапер добавить новых и ждём
+            console.log("[agent] Непроверенных нет, запрашиваем повторный скрапинг...");
+            try {
+                await apiRequest("POST", "/rescrape");
+                // Ждём 30 сек пока скрапер отработает
+                await new Promise(r => setTimeout(r, 30_000));
+            } catch {
+                console.error("[agent] Не удалось запросить скрапинг, ждём 30 сек...");
+                await new Promise(r => setTimeout(r, 30_000));
+            }
+        }
+    }
+
+    if (totalActive < MIN_ACTIVE) {
+        console.log(`[agent] Предупреждение: найдено только ${totalActive}/${MIN_ACTIVE} активных прокси после ${round} раундов.`);
     }
 }
 
