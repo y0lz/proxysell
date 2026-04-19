@@ -2,7 +2,12 @@
 import axios from "axios";
 import { proxies } from "./db.js";
 
-const SOURCES = [
+const SOURCES: Array<{
+    url: string;
+    type: "MTPROTO" | "SOCKS5";
+    parse: ((line: string) => string | null) | ((html: string) => string[]);
+    isHtml?: boolean;
+}> = [
     // ── MTProto ──────────────────────────────────────────────────────────────
     {
         url: "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
@@ -24,7 +29,13 @@ const SOURCES = [
         type: "MTPROTO" as const,
         parse: parseMtproto,
     },
-    // ── SOCKS5 ───────────────────────────────────────────────────────────────
+    // ── Telegram каналы (web-версия t.me/s/) ─────────────────────────────────
+    {
+        url: "https://t.me/s/mtpro_xyz",
+        type: "MTPROTO" as const,
+        parse: parseMtprotoFromHtml,
+        isHtml: true,
+    },
     {
         url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
         type: "SOCKS5" as const,
@@ -51,6 +62,16 @@ const SOURCES = [
         parse: parseSocks5,
     },
 ];
+
+// https://t.me/proxy?server=...&port=...&secret=... → tg://proxy?...
+function parseMtprotoFromHtml(html: string): string[] {
+    const matches = html.matchAll(/https:\/\/t\.me\/proxy\?([^"'\s<>]+)/g);
+    const result: string[] = [];
+    for (const m of matches) {
+        result.push(`tg://proxy?${m[1]}`);
+    }
+    return result;
+}
 
 // https://t.me/proxy?... → tg://proxy?...
 function parseMtproto(line: string): string | null {
@@ -80,14 +101,27 @@ export async function scrapeProxies(): Promise<void> {
 
     for (const source of SOURCES) {
         try {
-            const { data } = await axios.get<string>(source.url, { timeout: 10_000 });
+            const { data } = await axios.get<string>(source.url, {
+                timeout: 10_000,
+                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+            });
+
             let count = 0;
-            for (const line of data.split("\n")) {
-                const link = source.parse(line);
-                if (!link) continue;
-                proxies.insert(source.type, link);
-                count++;
+            if (source.isHtml) {
+                const links = (source.parse as (html: string) => string[])(data);
+                for (const link of links) {
+                    proxies.insert(source.type, link);
+                    count++;
+                }
+            } else {
+                for (const line of data.split("\n")) {
+                    const link = (source.parse as (line: string) => string | null)(line);
+                    if (!link) continue;
+                    proxies.insert(source.type, link);
+                    count++;
+                }
             }
+
             if (source.type === "MTPROTO") totalMt += count;
             else totalS5 += count;
             console.log(`[scraper] OK (${count}): ${source.url}`);
