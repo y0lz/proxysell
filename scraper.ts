@@ -19,10 +19,18 @@ const SOURCES: Array<{
 
 // https://t.me/proxy?server=...&port=...&secret=... → tg://proxy?...
 function parseMtprotoFromHtml(html: string): string[] {
-    const matches = html.matchAll(/https:\/\/t\.me\/proxy\?([^"'\s<>]+)/g);
     const result: string[] = [];
+    // Ищем ссылки в href атрибутах и в тексте
+    const matches = html.matchAll(/https:\/\/t\.me\/proxy\?([^"'\s<>]+)/g);
     for (const m of matches) {
-        result.push(`tg://proxy?${m[1]}`);
+        // Декодируем HTML entities (&amp; → &)
+        const params = m[1]!
+            .replace(/&amp;amp;/g, "&")
+            .replace(/&amp;/g, "&");
+        // Берём только ссылки с secret
+        if (params.includes("secret=")) {
+            result.push(`tg://proxy?${params}`);
+        }
     }
     return result;
 }
