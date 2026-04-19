@@ -1,6 +1,7 @@
 // index.ts — основной сервер (NL)
 import "dotenv/config";
 import http from "node:http";
+import { exec } from "node:child_process";
 import { scrapeProxies } from "./scraper.js";
 import { runChecker } from "./checker.js";
 import { bot } from "./bot.js";
@@ -78,25 +79,20 @@ bot.start();
 // ─── Фоновая инициализация ────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
+    // Даём боту и API подняться, потом скрапим
+    await sleep(3_000);
     await scrapeProxies();
 
-    // Крутим локальный чекер пока не наберём MIN_ACTIVE
-    let active = proxies.countByStatus("active");
+    // Локальный чекер только если RU агент не работает (fallback)
+    const active = proxies.countByStatus("active");
     console.log(`[init] Активных прокси в базе: ${active}`);
-
-    while (active < MIN_ACTIVE) {
-        console.log(`[init] Мало активных (${active}/${MIN_ACTIVE}), запускаем ещё раунд проверки...`);
+    if (active < 5) {
         await runChecker();
-        active = proxies.countByStatus("active");
-        if (active < MIN_ACTIVE && proxies.getUnchecked().length === 0) {
-            // Все проверены но мало активных — скрапим заново
-            console.log("[init] Непроверенных нет, повторный скрапинг...");
-            await scrapeProxies();
-        }
     }
-
-    console.log(`[init] Готово. Активных прокси: ${active}`);
+    console.log(`[init] Готово. Активных прокси: ${proxies.countByStatus("active")}`);
 }
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 void bootstrap();
 

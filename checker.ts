@@ -6,7 +6,7 @@ import { proxies } from "./db.js";
 import type { Proxy } from "./db.js";
 
 const TIMEOUT_MS  = 6_000;
-const CONCURRENCY = 100;
+const CONCURRENCY = 20; // низкая нагрузка — NL сервер слабый (512MB)
 
 const TELEGRAM_DCS = [
     { host: "149.154.175.53",  port: 443 },
