@@ -172,19 +172,25 @@ async function checkBatch(): Promise<number> {
 
 async function runAgentCycle(): Promise<void> {
     console.log("[agent] Запрашиваем непроверенные прокси...");
-    const active = await checkBatch();
 
-    if (active < MIN_ACTIVE) {
-        console.log(`[agent] Активных ${active}/${MIN_ACTIVE}, продолжаем проверку...`);
-        let total = active;
-        let rounds = 0;
-        while (total < MIN_ACTIVE && rounds < 20) {
-            const found = await checkBatch();
-            total += found;
-            rounds++;
-            if (found === 0) break;
+    let totalActive = 0;
+    let round = 0;
+    const MAX_ROUNDS = 30;
+
+    while (totalActive < MIN_ACTIVE && round < MAX_ROUNDS) {
+        round++;
+        const found = await checkBatch();
+        totalActive += found;
+        console.log(`[agent] Раунд ${round}: найдено активных ${found}, всего: ${totalActive}/${MIN_ACTIVE}`);
+        if (found === 0 && totalActive < MIN_ACTIVE) {
+            // Непроверенных больше нет — выходим
+            console.log("[agent] Непроверенных прокси больше нет.");
+            break;
         }
-        console.log(`[agent] Итого активных найдено за ${rounds + 1} раундов: ${total}`);
+        if (totalActive >= MIN_ACTIVE) {
+            console.log(`[agent] Достигнут минимум ${MIN_ACTIVE} активных прокси.`);
+            break;
+        }
     }
 }
 
