@@ -14,15 +14,7 @@ const MIN_ACTIVE_MT = 10;  // минимум активных MTProto
 const MIN_ACTIVE_S5 = 10;  // минимум активных SOCKS5
 const MAX_ROUNDS    = 200;
 
-const TELEGRAM_DCS = [
-    { host: "149.154.175.53",  port: 443 },
-    { host: "149.154.167.51",  port: 443 },
-    { host: "149.154.175.100", port: 443 },
-    { host: "149.154.167.91",  port: 443 },
-    { host: "91.108.56.130",   port: 443 },
-];
-
-interface ProxyRow {
+const HEALTH_PORT = Number(process.env["HEALTH_PORT"] ?? 3001);interface ProxyRow {
     id: number; type: string; link: string;
     status: string; ping_ms: number | null; country: string | null;
 }
@@ -106,12 +98,19 @@ function parseMtproto(link: string) {
 
 function checkSocks5(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
-        const dc = TELEGRAM_DCS[Math.floor(Math.random() * TELEGRAM_DCS.length)]!;
         const agent = new SocksProxyAgent(`socks5://${host}:${port}`, { timeout: TIMEOUT_MS });
         const start = Date.now();
         const req = https.get(
-            { hostname: dc.host, port: dc.port, path: "/", agent, timeout: TIMEOUT_MS },
-            (res) => { res.resume(); resolve(Date.now() - start); }
+            { hostname: "api.telegram.org", port: 443, path: "/", agent, timeout: TIMEOUT_MS },
+            (res) => {
+                res.resume();
+                // 200, 302, 404 — прокси живой, сервер ответил
+                if (res.statusCode && res.statusCode < 500) {
+                    resolve(Date.now() - start);
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                }
+            }
         );
         req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
         req.on("error", reject);
