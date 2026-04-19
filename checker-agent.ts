@@ -154,10 +154,15 @@ async function checkBatch(): Promise<number> {
 
     const active = results.filter(r => r.status === "active").length;
     const dead   = results.filter(r => r.status === "dead").length;
+    const slow   = results.filter(r => r.status === "slow").length;
+    const mtActive = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "MTPROTO").length;
+    const s5Active = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "SOCKS5").length;
+    const mtTotal  = batch.filter(p => p.type === "MTPROTO").length;
+    const s5Total  = batch.filter(p => p.type === "SOCKS5").length;
 
     try {
         await apiRequest("POST", "/report", results);
-        console.log(`[agent] Отправлено: активных ${active}, мёртвых ${dead}`);
+        console.log(`[agent] Проверено: MTProto ${mtTotal} (активных: ${mtActive}), SOCKS5 ${s5Total} (активных: ${s5Active}), медленных: ${slow}, мёртвых: ${dead}`);
     } catch (err) {
         console.error("[agent] Не удалось отправить результаты:", err);
     }
@@ -169,16 +174,17 @@ async function runAgentCycle(): Promise<void> {
     console.log("[agent] Запрашиваем непроверенные прокси...");
     const active = await checkBatch();
 
-    // Если активных мало — крутим ещё раунды не дожидаясь таймера
     if (active < MIN_ACTIVE) {
         console.log(`[agent] Активных ${active}/${MIN_ACTIVE}, продолжаем проверку...`);
         let total = active;
-        while (total < MIN_ACTIVE) {
+        let rounds = 0;
+        while (total < MIN_ACTIVE && rounds < 20) {
             const found = await checkBatch();
             total += found;
-            if (found === 0) break; // непроверенных больше нет
+            rounds++;
+            if (found === 0) break;
         }
-        console.log(`[agent] Итого активных найдено: ${total}`);
+        console.log(`[agent] Итого активных найдено за ${rounds + 1} раундов: ${total}`);
     }
 }
 
