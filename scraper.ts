@@ -8,58 +8,12 @@ const SOURCES: Array<{
     parse: ((line: string) => string | null) | ((html: string) => string[]);
     isHtml?: boolean;
 }> = [
-    // ── MTProto ──────────────────────────────────────────────────────────────
-    {
-        url: "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
-        type: "MTPROTO" as const,
-        parse: parseMtproto,
-    },
-    {
-        url: "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt",
-        type: "MTPROTO" as const,
-        parse: parseMtproto,
-    },
-    {
-        url: "https://raw.githubusercontent.com/ALIILAPRO/MTProtoProxy/main/mtproto.txt",
-        type: "MTPROTO" as const,
-        parse: parseMtproto,
-    },
-    {
-        url: "https://raw.githubusercontent.com/hookzof/socks5_list/master/tg/mtproto.txt",
-        type: "MTPROTO" as const,
-        parse: parseMtproto,
-    },
-    // ── Telegram каналы (web-версия t.me/s/) ─────────────────────────────────
+    // ── Telegram каналы ───────────────────────────────────────────────────────
     {
         url: "https://t.me/s/mtpro_xyz",
         type: "MTPROTO" as const,
         parse: parseMtprotoFromHtml,
         isHtml: true,
-    },
-    {
-        url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        type: "SOCKS5" as const,
-        parse: parseSocks5,
-    },
-    {
-        url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-        type: "SOCKS5" as const,
-        parse: parseSocks5,
-    },
-    {
-        url: "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-        type: "SOCKS5" as const,
-        parse: parseSocks5,
-    },
-    {
-        url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-        type: "SOCKS5" as const,
-        parse: parseSocks5Prefixed, // формат socks5://ip:port
-    },
-    {
-        url: "https://raw.githubusercontent.com/r00tee/Proxy-List/main/Socks5.txt",
-        type: "SOCKS5" as const,
-        parse: parseSocks5,
     },
 ];
 
@@ -71,28 +25,6 @@ function parseMtprotoFromHtml(html: string): string[] {
         result.push(`tg://proxy?${m[1]}`);
     }
     return result;
-}
-
-// https://t.me/proxy?... → tg://proxy?...
-function parseMtproto(line: string): string | null {
-    const t = line.trim();
-    if (t.startsWith("https://t.me/proxy?")) return t.replace("https://t.me/proxy?", "tg://proxy?");
-    if (t.startsWith("tg://proxy?")) return t;
-    return null;
-}
-
-// IP:PORT → tg://socks?server=IP&port=PORT
-function parseSocks5(line: string): string | null {
-    const t = line.trim();
-    const m = t.match(/^(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$/);
-    if (!m) return null;
-    return `tg://socks?server=${m[1]}&port=${m[2]}`;
-}
-
-// socks5://IP:PORT → tg://socks?server=IP&port=PORT
-function parseSocks5Prefixed(line: string): string | null {
-    const t = line.trim().replace(/^socks5:\/\//, "");
-    return parseSocks5(t);
 }
 
 export async function scrapeProxies(): Promise<void> {
