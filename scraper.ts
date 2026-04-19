@@ -93,4 +93,5 @@ export async function scrapeProxies(): Promise<void> {
     }
 
     console.log(`[scraper] Готово. MTProto: ${totalMt}, SOCKS5: ${totalS5}`);
+    console.log(`[db] unchecked: ${proxies.countByStatus("unchecked")} | active: ${proxies.countByStatus("active")} | slow: ${proxies.countByStatus("slow")} | dead: ${proxies.countByStatus("dead")}`);
 }
