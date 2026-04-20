@@ -35,28 +35,35 @@ bot.command("start", async (ctx) => {
     const username = ctx.from?.username;
     const firstName = ctx.from?.first_name;
     
-    if (userId) {
-        users.upsert(userId, username, firstName);
-        
-        // Для новых пользователей сразу предлагаем средний прокси
-        const user = users.get(userId);
-        if (user && JSON.parse(user.shown_proxy_ids).length === 0) {
-            const proxy = proxies.getProxyForNewUser();
-            if (proxy) {
-                // Добавляем в показанные
-                users.updateRerollData(userId, 0, null, null, [proxy.id]);
-                
-                await ctx.reply(
-                    `Привет! Я Anti-Block Bot.\n\n` +
-                    `Вот твой первый прокси (средний по рейтингу):\n\n` +
-                    `${proxyMessage(proxy)}`,
-                    {
-                        parse_mode: "Markdown",
-                        reply_markup: buildProxyKeyboard(proxy, false),
-                    }
-                );
-                return;
-            }
+    if (!userId) return;
+    
+    // Проверяем существует ли пользователь
+    let user = users.get(userId);
+    const isNewUser = !user;
+    
+    // Создаём или обновляем пользователя
+    users.upsert(userId, username, firstName);
+    user = users.get(userId);
+    
+    if (!user) return;
+    
+    // Только для НОВЫХ пользователей выдаём первый прокси
+    if (isNewUser && JSON.parse(user.shown_proxy_ids).length === 0) {
+        const proxy = proxies.getProxyForNewUser();
+        if (proxy) {
+            // Добавляем в показанные
+            users.updateRerollData(userId, 0, null, null, [proxy.id]);
+            
+            await ctx.reply(
+                `Привет! Я Anti-Block Bot.\n\n` +
+                `Вот твой первый прокси (средний по рейтингу):\n\n` +
+                `${proxyMessage(proxy)}`,
+                {
+                    parse_mode: "Markdown",
+                    reply_markup: buildProxyKeyboard(proxy, false),
+                }
+            );
+            return;
         }
     }
 
@@ -82,6 +89,22 @@ bot.callbackQuery("get_proxy", async (ctx) => {
     if (!user) return ctx.answerCallbackQuery();
 
     const isPlus = users.isPlus(user);
+    
+    // Для Free пользователей проверяем лимиты (кроме самого первого прокси)
+    if (!isPlus && JSON.parse(user.shown_proxy_ids).length > 0) {
+        const rerollCheck = proxies.canReroll(userId);
+        if (!rerollCheck.allowed) {
+            let message = "";
+            if (rerollCheck.reason === 'limit') {
+                const hours = Math.ceil((rerollCheck.wait_sec || 0) / 3600);
+                message = `⏳ Лимит исчерпан (3 прокси за 4ч). Подождите ${hours}ч или купите Plus.`;
+            }
+            return ctx.answerCallbackQuery({ text: message, show_alert: true });
+        }
+        // Записываем использование лимита
+        proxies.recordReroll(userId);
+    }
+
     const proxy = proxies.getNextProxy(userId);
 
     if (!proxy) {

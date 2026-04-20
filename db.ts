@@ -513,7 +513,8 @@ function recordReroll(userId: number): void {
     // Увеличиваем счётчик
     newCount += 1;
     
-    users.updateRerollData(userId, newCount, newWindowStart, now.toISOString(), JSON.parse(user.shown_proxy_ids));
+    const shownIds = JSON.parse(user.shown_proxy_ids);
+    users.updateRerollData(userId, newCount, newWindowStart, now.toISOString(), shownIds);
 }
 
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
