@@ -1,6 +1,7 @@
 // bot.ts
 import { Bot, InlineKeyboard } from "grammy";
 import { users, proxies, plans, payments } from "./db.js";
+import db from "./db.js";
 import type { Proxy } from "./db.js";
 
 export const bot = new Bot(process.env["BOT_TOKEN"] ?? "");
@@ -100,7 +101,7 @@ bot.command("start", async (ctx) => {
         "Привет! Я Anti-Block Bot.\n\n" +
         "Собираю быстрые MTProto прокси для обхода блокировок Telegram.\n" +
         "Free: 3 реролла каждые 4 часа\n" +
-        "Plus: безлимитные реролы с КД 10 сек",
+        "Plus: безлимитные реролы с КД 7 сек",
         { reply_markup: keyboard }
     );
 });
@@ -112,7 +113,7 @@ bot.callbackQuery("main_menu", async (ctx) => {
         "🏠 Главное меню\n\n" +
         "Собираю быстрые MTProto прокси для обхода блокировок Telegram.\n" +
         "Free: 3 реролла каждые 4 часа\n" +
-        "Plus: безлимитные реролы с КД 10 сек",
+        "Plus: безлимитные реролы с КД 7 сек",
         { reply_markup: buildMainMenu() }
     );
     await ctx.answerCallbackQuery();
@@ -251,10 +252,65 @@ bot.callbackQuery(/^vote_(like|dislike|fire)_(\d+)$/, async (ctx) => {
     const vote = ctx.match[1] as "like" | "dislike" | "fire";
     const proxyId = parseInt(ctx.match[2]!, 10);
 
+    // Проверяем, не голосовал ли уже пользователь за этот прокси
+    const existingVote = db.prepare(`
+        SELECT vote FROM proxy_votes WHERE proxy_id = ? AND user_id = ?
+    `).get(proxyId, userId) as { vote: string } | undefined;
+
+    if (existingVote) {
+        await ctx.answerCallbackQuery({ text: "Вы уже оценили этот прокси!", show_alert: true });
+        return;
+    }
+
+    // Записываем голос
     proxies.vote(proxyId, userId, vote);
 
     const labels = { like: "👍 Спасибо!", dislike: "👎 Учтём.", fire: "🔥 Огонь!" };
-    await ctx.answerCallbackQuery({ text: labels[vote] });
+    
+    // Если дизлайк - автоматически переходим к следующему прокси
+    if (vote === 'dislike') {
+        await ctx.answerCallbackQuery({ text: labels[vote] });
+        
+        const user = users.get(userId);
+        if (!user) return;
+
+        const isPlus = users.isPlus(user);
+        
+        // Проверяем возможность реролла
+        const rerollCheck = proxies.canReroll(userId);
+        if (!rerollCheck.allowed) {
+            let message = "";
+            if (rerollCheck.reason === 'cd') {
+                message = `⏳ Кулдаун реролла. Подождите ${rerollCheck.wait_sec} сек.`;
+            } else if (rerollCheck.reason === 'limit') {
+                const hours = Math.ceil((rerollCheck.wait_sec || 0) / 3600);
+                message = `⏳ Лимит исчерпан (3 прокси за 4ч). Подождите ${hours}ч или купите Plus!`;
+            }
+            return ctx.answerCallbackQuery({ text: message, show_alert: true });
+        }
+
+        // Записываем реролл
+        proxies.recordReroll(userId);
+        
+        // Получаем следующий прокси
+        const nextProxy = proxies.getNextProxy(userId);
+        if (!nextProxy) {
+            return ctx.answerCallbackQuery({
+                text: "😔 Больше нет активных прокси. Попробуйте позже.",
+                show_alert: true,
+            });
+        }
+
+        // Проверяем можно ли ещё делать реролл после этого
+        const canRerollNext = isPlus || proxies.canReroll(userId).allowed;
+
+        await ctx.editMessageText(proxyMessage(nextProxy), {
+            parse_mode: "Markdown",
+            reply_markup: buildProxyKeyboard(nextProxy, isPlus, canRerollNext),
+        });
+    } else {
+        await ctx.answerCallbackQuery({ text: labels[vote] });
+    }
 });
 
 // ─── Plus покупка ─────────────────────────────────────────────────────────────
@@ -262,7 +318,7 @@ bot.callbackQuery(/^vote_(like|dislike|fire)_(\d+)$/, async (ctx) => {
 bot.callbackQuery("buy_plus", async (ctx) => {
     await ctx.editMessageText(
         "⭐ *Plus подписка*\n\n" +
-        "• Безлимитные реролы \\(КД 10 сек, макс 10 за 5 мин\\)\n" +
+        "• Безлимитные реролы \\(КД 7 сек\\)\n" +
         "• Прокси с лучшим рейтингом в первую очередь\n" +
         "• Приоритетная поддержка\n\n" +
         "⚠️ Сейчас оплата в тестовом режиме — подписка активируется бесплатно\\.",
@@ -309,7 +365,7 @@ bot.callbackQuery("help", async (ctx) => {
         "3\\. Подтвердите в диалоге\n\n" +
         "*Реролл прокси:*\n" +
         "• Free: 3 реролла каждые 4 часа \\(случайные прокси\\)\n" +
-        "• Plus: безлимит с КД 10 сек \\(лучшие прокси\\)\n\n" +
+        "• Plus: безлимит с КД 7 сек \\(лучшие прокси\\)\n\n" +
         "Если прокси не работает — нажмите 👎 и попробуйте снова\\.",
         { parse_mode: "MarkdownV2", reply_markup: buildHelpMenu() }
     );

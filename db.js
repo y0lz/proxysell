@@ -127,10 +127,10 @@ if (planCount.count === 0) {
         VALUES (@id, @duration_days, @stars, @reroll_limit, @reroll_window_sec, @reroll_cd_sec)
     `);
     const defaultPlans = [
-        { id: 'free', duration_days: 0, stars: 0, reroll_limit: 3, reroll_window_sec: 14400, reroll_cd_sec: 0 }, // 4 часа
-        { id: 'plus_10', duration_days: 10, stars: 13, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 }, // 5 мин
-        { id: 'plus_30', duration_days: 30, stars: 30, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 },
-        { id: 'plus_60', duration_days: 60, stars: 50, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 },
+        { id: 'free', duration_days: 0, stars: 0, reroll_limit: 3, reroll_window_sec: 14400, reroll_cd_sec: 7 }, // 4 часа, КД 7 сек
+        { id: 'plus_10', duration_days: 10, stars: 13, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 }, // безлимит, КД 7 сек
+        { id: 'plus_30', duration_days: 30, stars: 30, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 },
+        { id: 'plus_60', duration_days: 60, stars: 50, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 },
     ];
     for (const plan of defaultPlans) {
         insertPlan.run(plan);
@@ -446,7 +446,7 @@ const stmtUpdateReputation = db.prepare(`
   UPDATE proxies SET
     likes    = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'like'),
     dislikes = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'dislike'),
-    fires    = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'fire')
+    fires    = (SELECT COUNT(*) * 2 FROM proxy_votes WHERE proxy_id = @id AND vote = 'fire')
   WHERE id = @id
 `);
 const stmtSetCountry = db.prepare(`
