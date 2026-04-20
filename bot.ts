@@ -94,6 +94,7 @@ bot.callbackQuery("get_free", async (ctx) => {
     }
 
     if (!vip) users.setLastFree(userId);
+    users.setLastProxyId(userId, proxy.id);
 
     await ctx.reply(proxyMessage(proxy), {
         parse_mode: "Markdown",
@@ -112,8 +113,9 @@ bot.callbackQuery(/^reroll_(\d+)$/, async (ctx) => {
         return ctx.answerCallbackQuery({ text: "❌ Только для VIP.", show_alert: true });
     }
 
-    const currentId = parseInt(ctx.match[1]!, 10);
-    const proxy = proxies.getNextProxy("MTPROTO", currentId);
+    // Исключаем последний показанный прокси
+    const excludeId = user.last_proxy_id ?? parseInt(ctx.match[1]!, 10);
+    const proxy = proxies.getNextProxy("MTPROTO", excludeId);
 
     if (!proxy) {
         return ctx.answerCallbackQuery({
@@ -121,6 +123,8 @@ bot.callbackQuery(/^reroll_(\d+)$/, async (ctx) => {
             show_alert: true,
         });
     }
+
+    users.setLastProxyId(userId, proxy.id);
 
     await ctx.editMessageText(proxyMessage(proxy), {
         parse_mode: "Markdown",

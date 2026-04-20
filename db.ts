@@ -51,7 +51,7 @@ db.exec(`
 `);
 
 // Добавляем счётчики репутации в proxies если нет
-try { db.exec(`ALTER TABLE proxies ADD COLUMN likes INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN last_proxy_id INTEGER`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE proxies ADD COLUMN dislikes INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE proxies ADD COLUMN fires INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
 
@@ -62,6 +62,7 @@ export interface User {
     is_vip: number;
     vip_until: string | null;
     last_free: string | null;
+    last_proxy_id: number | null;
     joined_at: string;
 }
 
@@ -97,6 +98,10 @@ const stmtSetVip = db.prepare(`
   UPDATE users SET is_vip = 1, vip_until = @vip_until WHERE id = @id
 `);
 
+const stmtSetLastProxyId = db.prepare(`
+  UPDATE users SET last_proxy_id = ? WHERE id = ?
+`);
+
 const stmtExpireVip = db.prepare(`
   UPDATE users SET is_vip = 0, vip_until = NULL
   WHERE vip_until IS NOT NULL AND vip_until < datetime('now')
@@ -112,6 +117,7 @@ export const users = {
         stmtSetVip.run({ id, vip_until });
     },
     expireVip: () => stmtExpireVip.run(),
+    setLastProxyId: (userId: number, proxyId: number) => stmtSetLastProxyId.run(proxyId, userId),
 };
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
@@ -143,7 +149,7 @@ const stmtGetVipProxy = db.prepare<[string], Proxy>(`
   LIMIT 1
 `);
 
-// Следующий прокси для rerolla — исключаем текущий
+// Следующий прокси для reroll — исключаем последний показанный пользователю
 const stmtGetNextProxy = db.prepare<[string, number], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active' AND type = ? AND id != ?
