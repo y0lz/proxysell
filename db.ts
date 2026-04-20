@@ -156,7 +156,7 @@ const stmtGetVipProxy = db.prepare<[string], Proxy>(`
 const stmtGetNextProxy = db.prepare<[string, number], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active' AND type = ? AND id != ?
-  ORDER BY likes DESC, ping_ms ASC
+  ORDER BY likes DESC, RANDOM()
   LIMIT 1
 `);
 
