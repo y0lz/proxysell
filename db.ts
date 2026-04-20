@@ -39,6 +39,22 @@ db.exec(`
 try { db.exec(`ALTER TABLE users ADD COLUMN vip_until TEXT`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE proxies ADD COLUMN country TEXT`); } catch { /* уже есть */ }
 
+// Таблица репутации прокси
+db.exec(`
+  CREATE TABLE IF NOT EXISTS proxy_votes (
+    proxy_id  INTEGER NOT NULL,
+    user_id   INTEGER NOT NULL,
+    vote      TEXT NOT NULL, -- 'like' | 'dislike' | 'fire'
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (proxy_id, user_id)
+  );
+`);
+
+// Добавляем счётчики репутации в proxies если нет
+try { db.exec(`ALTER TABLE proxies ADD COLUMN likes INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE proxies ADD COLUMN dislikes INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE proxies ADD COLUMN fires INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+
 // ─── Типы ─────────────────────────────────────────────────────────────────────
 
 export interface User {
@@ -56,6 +72,9 @@ export interface Proxy {
     status: string;
     ping_ms: number | null;
     country: string | null;
+    likes: number;
+    dislikes: number;
+    fires: number;
     updated_at: string;
 }
 
@@ -116,6 +135,22 @@ const stmtGetFastActiveByType = db.prepare<[string], Proxy>(`
   LIMIT 1
 `);
 
+// VIP — сначала прокси с лайками, потом по пингу
+const stmtGetVipProxy = db.prepare<[string], Proxy>(`
+  SELECT * FROM proxies
+  WHERE status = 'active' AND type = ?
+  ORDER BY likes DESC, ping_ms ASC
+  LIMIT 1
+`);
+
+// Следующий прокси для rerolla — исключаем текущий
+const stmtGetNextProxy = db.prepare<[string, number], Proxy>(`
+  SELECT * FROM proxies
+  WHERE status = 'active' AND type = ? AND id != ?
+  ORDER BY likes DESC, ping_ms ASC
+  LIMIT 1
+`);
+
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
   SELECT * FROM proxies WHERE status = 'unchecked'
   ORDER BY CASE type WHEN 'MTPROTO' THEN 0 ELSE 1 END
@@ -128,9 +163,24 @@ const stmtSetStatus = db.prepare(`
   WHERE id = @id
 `);
 
+const stmtVote = db.prepare(`
+  INSERT INTO proxy_votes (proxy_id, user_id, vote) VALUES (@proxy_id, @user_id, @vote)
+  ON CONFLICT(proxy_id, user_id) DO UPDATE SET vote = @vote, created_at = datetime('now')
+`);
+
+const stmtUpdateReputation = db.prepare(`
+  UPDATE proxies SET
+    likes    = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'like'),
+    dislikes = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'dislike'),
+    fires    = (SELECT COUNT(*) FROM proxy_votes WHERE proxy_id = @id AND vote = 'fire')
+  WHERE id = @id
+`);
+
 const stmtSetCountry = db.prepare(`
   UPDATE proxies SET country = @country WHERE id = @id
 `);
+
+const stmtGetById = db.prepare<[number], Proxy>(`SELECT * FROM proxies WHERE id = ?`);
 
 const stmtDeleteDead = db.prepare(`
   DELETE FROM proxies
@@ -147,11 +197,23 @@ export const proxies = {
         stmtInsertProxy.run({ type, link, status: "unchecked" }),
     getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
     getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
+    getVipProxy: (type: string): Proxy | undefined => stmtGetVipProxy.get(type),
+    getNextProxy: (type: string, excludeId: number): Proxy | undefined => stmtGetNextProxy.get(type, excludeId),
+    getById: (id: number): Proxy | undefined => stmtGetById.get(id),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
     setStatus: (id: number, status: string, ping_ms: number | null) =>
         stmtSetStatus.run({ id, status, ping_ms }),
     setCountry: (id: number, country: string) =>
         stmtSetCountry.run({ id, country }),
+    vote: (proxy_id: number, user_id: number, vote: "like" | "dislike" | "fire") => {
+        stmtVote.run({ proxy_id, user_id, vote });
+        stmtUpdateReputation.run({ id: proxy_id });
+        // Если много дизлайков — помечаем как dead
+        const proxy = stmtGetById.get(proxy_id);
+        if (proxy && proxy.dislikes >= 5 && proxy.dislikes > proxy.likes * 2) {
+            stmtSetStatus.run({ id: proxy_id, status: "dead", ping_ms: null });
+        }
+    },
     deleteDead: () => {
         const result = stmtDeleteDead.run();
         return result.changes;
