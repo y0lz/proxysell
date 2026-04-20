@@ -51,7 +51,7 @@ function apiRequest<T>(method: string, path: string, body?: unknown): Promise<T>
                     "Content-Type": "application/json",
                     ...(bodyStr ? { "Content-Length": Buffer.byteLength(bodyStr) } : {}),
                 },
-                timeout: 30_000,
+                timeout: 60_000, // Увеличил до 60 секунд
             },
             (res) => {
                 let data = "";
@@ -160,7 +160,8 @@ async function runCycle(): Promise<void> {
         stats = await apiRequest<StatsResponse>("GET", "/stats");
     } catch (err) {
         console.error("[agent] Не удалось получить статистику:", err);
-        return;
+        console.log("[agent] Повторная попытка через 30 секунд...");
+        return; // Выходим из цикла, следующий запуск через 15 минут
     }
 
     const needMore = stats.active_mt < MIN_ACTIVE;
