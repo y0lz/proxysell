@@ -26,6 +26,16 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // GET /stats — статистика БД для агента
+    if (req.method === "GET" && req.url === "/stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+            active_mt: proxies.countByStatus("active"),
+            unchecked: proxies.getUnchecked().length,
+        }));
+        return;
+    }
+
     if (req.method === "GET" && req.url === "/unchecked") {
         const batch = proxies.getUnchecked();
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -34,7 +44,7 @@ const server = http.createServer((req, res) => {
     }
 
 let lastScrapeTime = 0;
-const SCRAPE_COOLDOWN = 10 * 60 * 1000; // не чаще раза в 10 минут
+const SCRAPE_COOLDOWN = 30 * 60 * 1000; // не чаще раза в 30 минут
 
     // POST /rescrape — агент просит запустить скрапер заново
     if (req.method === "POST" && req.url === "/rescrape") {

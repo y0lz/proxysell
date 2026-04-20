@@ -5,22 +5,31 @@ import http from "node:http";
 import net from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
 
-const MAIN_SERVER = process.env["MAIN_SERVER_URL"] ?? "";
-const API_SECRET  = process.env["API_SECRET"]      ?? "";
-const TIMEOUT_MS  = 6_000;
-const CONCURRENCY = 100;
-const INTERVAL_MS = 5 * 60 * 1000;
-const MIN_ACTIVE_MT = 10;  // минимум активных MTProto
-const MIN_ACTIVE_S5 = 10;  // минимум активных SOCKS5
-const MAX_ROUNDS    = 200;
+const MAIN_SERVER  = process.env["MAIN_SERVER_URL"] ?? "";
+const API_SECRET   = process.env["API_SECRET"]      ?? "";
+const HEALTH_PORT  = Number(process.env["HEALTH_PORT"] ?? 3001);
+
+const TIMEOUT_MS   = 6_000;
+const CONCURRENCY  = 100;
+const MIN_ACTIVE   = 10;   // минимум активных MTProto в базе
+const CYCLE_MS     = 15 * 60 * 1000; // повторный цикл каждые 15 минут
+
+const TELEGRAM_DCS = [
+    { host: "149.154.175.53",  port: 443 },
+    { host: "149.154.167.51",  port: 443 },
+    { host: "149.154.175.100", port: 443 },
+    { host: "149.154.167.91",  port: 443 },
+    { host: "91.108.56.130",   port: 443 },
+];
+
+// ─── Типы ─────────────────────────────────────────────────────────────────────
 
 interface ProxyRow {
     id: number; type: string; link: string;
     status: string; ping_ms: number | null; country: string | null;
 }
-interface CheckResult {
-    id: number; status: string; ping_ms: number | null;
-}
+interface CheckResult { id: number; status: string; ping_ms: number | null; }
+interface StatsResponse { active_mt: number; unchecked: number; }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -49,7 +58,7 @@ function apiRequest<T>(method: string, path: string, body?: unknown): Promise<T>
                 res.on("data", c => { data += c; });
                 res.on("end", () => {
                     try { resolve(JSON.parse(data) as T); }
-                    catch { reject(new Error("Bad JSON: " + data)); }
+                    catch { reject(new Error(`Bad JSON: ${data.slice(0, 100)}`)); }
                 });
             }
         );
@@ -60,18 +69,12 @@ function apiRequest<T>(method: string, path: string, body?: unknown): Promise<T>
     });
 }
 
-// retry для POST /report — не теряем результаты при моргании сети
-async function reportWithRetry(results: CheckResult[], retries = 2): Promise<void> {
-    for (let i = 0; i <= retries; i++) {
-        try {
-            await apiRequest("POST", "/report", results);
-            return;
-        } catch (err) {
-            if (i === retries) { console.error("[agent] Не удалось отправить результаты:", err); return; }
-            console.warn(`[agent] Ошибка отправки, повтор ${i + 1}/${retries}...`);
-            await sleep(2_000);
-        }
+async function reportWithRetry(results: CheckResult[]): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+        try { await apiRequest("POST", "/report", results); return; }
+        catch { if (i < 2) await sleep(2_000); }
     }
+    console.error("[agent] Не удалось отправить результаты после 3 попыток");
 }
 
 // ─── Парсеры ──────────────────────────────────────────────────────────────────
@@ -101,24 +104,16 @@ function checkSocks5(host: string, port: number): Promise<number> {
         const agent = new SocksProxyAgent(`socks5://${host}:${port}`);
         const start = Date.now();
         let done = false;
-
-        // Страховочный таймаут — socks-proxy-agent иногда игнорирует timeout опцию
         const timer = setTimeout(() => {
             if (!done) { done = true; req.destroy(); reject(new Error("timeout")); }
         }, TIMEOUT_MS);
-
         const req = https.get(
             { hostname: "api.telegram.org", port: 443, path: "/", agent },
             (res) => {
                 if (done) return;
-                done = true;
-                clearTimeout(timer);
-                res.resume();
-                if (res.statusCode && res.statusCode < 500) {
-                    resolve(Date.now() - start);
-                } else {
-                    reject(new Error(`HTTP ${res.statusCode}`));
-                }
+                done = true; clearTimeout(timer); res.resume();
+                if (res.statusCode && res.statusCode < 500) resolve(Date.now() - start);
+                else reject(new Error(`HTTP ${res.statusCode}`));
             }
         );
         req.on("timeout", () => { if (!done) { done = true; clearTimeout(timer); req.destroy(); reject(new Error("timeout")); } });
@@ -126,7 +121,6 @@ function checkSocks5(host: string, port: number): Promise<number> {
     });
 }
 
-// MTProto: простой TCP connect — если порт открыт, прокси живой
 function checkMtproto(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
         const start = Date.now();
@@ -155,98 +149,100 @@ async function checkOne(proxy: ProxyRow): Promise<CheckResult> {
     }
 }
 
-// ─── Батч-проверка ────────────────────────────────────────────────────────────
+// ─── Основной цикл ────────────────────────────────────────────────────────────
 
-// Возвращает { activeMt, activeS5, batchEmpty }
-async function checkBatch(): Promise<{ activeMt: number; activeS5: number; batchEmpty: boolean }> {
-    let batch: ProxyRow[];
+async function runCycle(): Promise<void> {
+    console.log("[agent] ── Новый цикл ──────────────────────────────────");
+
+    // Узнаём текущее состояние базы
+    let stats: StatsResponse;
     try {
-        batch = await apiRequest<ProxyRow[]>("GET", "/unchecked");
+        stats = await apiRequest<StatsResponse>("GET", "/stats");
     } catch (err) {
-        console.error("[agent] Не удалось получить прокси:", err);
-        return { activeMt: 0, activeS5: 0, batchEmpty: false };
+        console.error("[agent] Не удалось получить статистику:", err);
+        return;
     }
 
-    if (batch.length === 0) {
-        console.log("[agent] Нет непроверенных прокси.");
-        return { activeMt: 0, activeS5: 0, batchEmpty: true };
-    }
+    const needMore = stats.active_mt < MIN_ACTIVE;
+    console.log(`[agent] Активных: ${stats.active_mt}/${MIN_ACTIVE}, непроверенных: ${stats.unchecked} | режим: ${needMore ? "🔴 агрессивный" : "🟢 обычный"}`);
 
-    const mtTotal = batch.filter(p => p.type === "MTPROTO").length;
-    const s5Total = batch.filter(p => p.type === "SOCKS5").length;
-    console.log(`[agent] Проверяем ${batch.length} прокси (MTProto: ${mtTotal}, SOCKS5: ${s5Total})...`);
-
-    const results: CheckResult[] = [];
-    for (let i = 0; i < batch.length; i += CONCURRENCY) {
-        const chunk = batch.slice(i, i + CONCURRENCY);
-        const settled = await Promise.allSettled(chunk.map(checkOne));
-        for (const r of settled) {
-            if (r.status === "fulfilled") results.push(r.value);
+    // Если непроверенных нет — просим скрапинг
+    if (stats.unchecked === 0) {
+        console.log("[agent] Непроверенных нет, запрашиваем скрапинг...");
+        try { await apiRequest("POST", "/rescrape"); } catch { /* ignore */ }
+        await sleep(45_000);
+        try { stats = await apiRequest<StatsResponse>("GET", "/stats"); } catch { return; }
+        if (stats.unchecked === 0) {
+            console.log("[agent] После скрапинга непроверенных нет. Выходим.");
+            return;
         }
     }
 
-    const activeMt = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "MTPROTO").length;
-    const activeS5 = results.filter(r => r.status === "active" && batch.find(p => p.id === r.id)?.type === "SOCKS5").length;
-    const slow     = results.filter(r => r.status === "slow").length;
-    const dead     = results.filter(r => r.status === "dead").length;
+    // Проверяем все unchecked батчами
+    let totalChecked = 0;
+    let totalActive  = 0;
+    let currentActive = stats.active_mt;
 
-    console.log(`[agent] Результат: MTProto активных ${activeMt}/${mtTotal}, SOCKS5 активных ${activeS5}/${s5Total}, медленных: ${slow}, мёртвых: ${dead}`);
-
-    await reportWithRetry(results);
-
-    return { activeMt, activeS5, batchEmpty: false };
-}
-
-// ─── Основной цикл ────────────────────────────────────────────────────────────
-
-async function runAgentCycle(): Promise<void> {
-    let totalMt = 0;
-    let totalS5 = 0;
-    let round = 0;
-
-    while ((totalMt < MIN_ACTIVE_MT || totalS5 < MIN_ACTIVE_S5) && round < MAX_ROUNDS) {
-        round++;
-        const { activeMt, activeS5, batchEmpty } = await checkBatch();
-        totalMt += activeMt;
-        totalS5 += activeS5;
-
-        console.log(`[agent] Раунд ${round}: MTProto ${totalMt}/${MIN_ACTIVE_MT}, SOCKS5 ${totalS5}/${MIN_ACTIVE_S5}`);
-
-        if (totalMt >= MIN_ACTIVE_MT && totalS5 >= MIN_ACTIVE_S5) {
-            console.log(`[agent] Достигнут минимум по обоим типам за ${round} раундов.`);
+    while (true) {
+        let batch: ProxyRow[];
+        try {
+            batch = await apiRequest<ProxyRow[]>("GET", "/unchecked");
+        } catch (err) {
+            console.error("[agent] Ошибка получения батча:", err);
             break;
         }
 
-        if (batchEmpty) {
-            console.log("[agent] Непроверенных нет, запрашиваем скрапинг...");
+        if (batch.length === 0) {
+            console.log("[agent] Все непроверенные обработаны.");
+            break;
+        }
+
+        const mtCount = batch.filter(p => p.type === "MTPROTO").length;
+        const s5Count = batch.filter(p => p.type === "SOCKS5").length;
+        console.log(`[agent] Проверяем ${batch.length} (MT:${mtCount} S5:${s5Count})...`);
+
+        const results: CheckResult[] = [];
+        for (let i = 0; i < batch.length; i += CONCURRENCY) {
+            const chunk = batch.slice(i, i + CONCURRENCY);
+            const settled = await Promise.allSettled(chunk.map(checkOne));
+            for (const r of settled) {
+                if (r.status === "fulfilled") results.push(r.value);
+            }
+        }
+
+        const batchActive = results.filter(r => r.status === "active").length;
+        const batchDead   = results.filter(r => r.status === "dead").length;
+        totalChecked  += results.length;
+        totalActive   += batchActive;
+        currentActive += batchActive;
+
+        console.log(`[agent] Батч: +${batchActive} активных, ${batchDead} мёртвых | итого активных: ${currentActive}`);
+        await reportWithRetry(results);
+
+        // В агрессивном режиме (мало активных) — сразу запрашиваем скрапинг
+        // если нашли мало и батч был маленький (источники иссякают)
+        if (currentActive < MIN_ACTIVE && batch.length < 20) {
+            console.log("[agent] Мало активных и мало непроверенных — запрашиваем скрапинг...");
             try { await apiRequest("POST", "/rescrape"); } catch { /* ignore */ }
-            await sleep(30_000);
+            await sleep(45_000);
         }
     }
 
-    if (totalMt < MIN_ACTIVE_MT || totalS5 < MIN_ACTIVE_S5) {
-        console.log(`[agent] После ${round} раундов: MTProto ${totalMt}/${MIN_ACTIVE_MT}, SOCKS5 ${totalS5}/${MIN_ACTIVE_S5}`);
-    }
+    console.log(`[agent] Цикл завершён. Проверено: ${totalChecked}, найдено активных: ${totalActive}, итого в базе: ${currentActive}`);
 }
 
 // ─── Health-check + restart HTTP сервер ──────────────────────────────────────
 
-const HEALTH_PORT  = Number(process.env["HEALTH_PORT"]  ?? 3001);
-const MAIN_API_URL = process.env["MAIN_SERVER_URL"]     ?? "";
-
 http.createServer((req, res) => {
     const auth = req.headers["x-api-secret"];
-    if (req.url !== "/ping" && (!API_SECRET || auth !== API_SECRET)) {
+
+    if (req.url === "/ping") { res.writeHead(200).end("ok"); return; }
+
+    if (!API_SECRET || auth !== API_SECRET) {
         res.writeHead(401).end("Unauthorized");
         return;
     }
 
-    if (req.url === "/ping") {
-        res.writeHead(200).end("ok");
-        return;
-    }
-
-    // POST /restart — перезапустить агент (PM2 поднимет)
     if (req.method === "POST" && req.url === "/restart") {
         console.log("[agent] Получен запрос на перезапуск...");
         res.writeHead(200).end(JSON.stringify({ ok: true }));
@@ -254,26 +250,23 @@ http.createServer((req, res) => {
         return;
     }
 
-    // POST /restart-peer — перезапустить NL сервер
     if (req.method === "POST" && req.url === "/restart-peer") {
         console.log("[agent] Отправляем команду перезапуска NL серверу...");
         res.writeHead(200).end(JSON.stringify({ ok: true }));
-        if (MAIN_API_URL) {
-            const url = new URL(MAIN_API_URL + "/restart");
-            const req2 = http.request(
-                { hostname: url.hostname, port: url.port, path: "/restart", method: "POST",
-                  headers: { "x-api-secret": API_SECRET }, timeout: 5_000 },
-                (r) => { r.resume(); console.log(`[agent] NL перезапущен, статус: ${r.statusCode}`); }
-            );
-            req2.on("error", (e) => console.error("[agent] Ошибка:", e.message));
-            req2.end();
-        }
+        const url = new URL(MAIN_SERVER + "/restart");
+        const req2 = http.request(
+            { hostname: url.hostname, port: url.port, path: "/restart", method: "POST",
+              headers: { "x-api-secret": API_SECRET }, timeout: 5_000 },
+            (r) => { r.resume(); }
+        );
+        req2.on("error", () => {});
+        req2.end();
         return;
     }
 
     res.writeHead(404).end();
 }).listen(HEALTH_PORT, () => {
-    console.log(`[agent] Health-check доступен на порту ${HEALTH_PORT} (/ping)`);
+    console.log(`[agent] Health-check на порту ${HEALTH_PORT}`);
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
@@ -283,6 +276,6 @@ if (!MAIN_SERVER) {
     process.exit(1);
 }
 
-console.log(`[agent] RU checker-agent запущен. Сервер: ${MAIN_SERVER}`);
-await runAgentCycle();
-setInterval(() => { void runAgentCycle(); }, INTERVAL_MS);
+console.log(`[agent] Запущен. Сервер: ${MAIN_SERVER}`);
+await runCycle();
+setInterval(() => { void runCycle(); }, CYCLE_MS);

@@ -11,8 +11,7 @@ export const SOURCES: Array<{
     { name: "mtpro_xyz",     url: "https://t.me/s/mtpro_xyz",     type: "MTPROTO", parser: "tme_proxy" },
     { name: "proxyListFree", url: "https://t.me/s/proxyListFree", type: "MTPROTO", parser: "tme_proxy" },
     { name: "mtrproxytg",    url: "https://t.me/s/mtrproxytg",    type: "MTPROTO", parser: "tme_raw_fields" },
-    { name: "ProxyMTProto",  url: "https://t.me/s/ProxyMTProto",  type: "MTPROTO", parser: "tme_raw_fields" },
-    { name: "toproxylab",    url: "https://t.me/s/toproxylab",    type: "SOCKS5",  parser: "toproxylab_socks5" },
+    { name: "ProxyMTProto",  url: "https://t.me/s/ProxyMTProto",  type: "MTPROTO", parser: "tme_raw_fields" },    { name: "toproxylab",    url: "https://t.me/s/toproxylab",    type: "SOCKS5",  parser: "toproxylab_socks5" },
     { name: "grim1313",      url: "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt", type: "MTPROTO", parser: "tme_proxy" },
 ];
 
