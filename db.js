@@ -127,7 +127,7 @@ if (planCount.count === 0) {
         VALUES (@id, @duration_days, @stars, @reroll_limit, @reroll_window_sec, @reroll_cd_sec)
     `);
     const defaultPlans = [
-        { id: 'free', duration_days: 0, stars: 0, reroll_limit: 3, reroll_window_sec: 14400, reroll_cd_sec: 7 }, // 4 часа, КД 7 сек
+        { id: 'free', duration_days: 0, stars: 0, reroll_limit: 10, reroll_window_sec: 18000, reroll_cd_sec: 7 }, // 10 попыток за 5 часов, КД 7 сек
         { id: 'plus_10', duration_days: 10, stars: 13, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 }, // безлимит, КД 7 сек
         { id: 'plus_30', duration_days: 30, stars: 30, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 },
         { id: 'plus_60', duration_days: 60, stars: 50, reroll_limit: 999999, reroll_window_sec: 86400, reroll_cd_sec: 7 },
