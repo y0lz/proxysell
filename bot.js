@@ -2,6 +2,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { users, proxies, plans, payments } from "./db.js";
 import db from "./db.js";
+import { notifyNewUser, notifyPurchase } from "./notifications.js";
 export const bot = new Bot(process.env["BOT_TOKEN"] ?? "");
 // ─── Хелперы ──────────────────────────────────────────────────────────────────
 function proxyMessage(proxy) {
@@ -65,6 +66,15 @@ bot.command("start", async (ctx) => {
     user = users.get(userId);
     if (!user)
         return;
+    // Уведомляем о новом пользователе
+    if (isNewUser) {
+        await notifyNewUser({
+            userId,
+            username,
+            firstName,
+            timestamp: new Date()
+        });
+    }
     // Только для НОВЫХ пользователей выдаём первый прокси
     if (isNewUser && JSON.parse(user.shown_proxy_ids).length === 0) {
         const proxy = proxies.getProxyForNewUser();
@@ -274,28 +284,43 @@ bot.callbackQuery("buy_plus", async (ctx) => {
         "• Безлимитные реролы \\(КД 7 сек\\)\n" +
         "• Прокси с лучшим рейтингом в первую очередь\n" +
         "• Приоритетная поддержка\n\n" +
-        "⚠️ Сейчас оплата в тестовом режиме — подписка активируется бесплатно\\.", { parse_mode: "MarkdownV2", reply_markup: buildPlusMenu() });
+        "💳 Оплата через Telegram Stars", { parse_mode: "MarkdownV2", reply_markup: buildPlusMenu() });
     await ctx.answerCallbackQuery();
 });
 bot.callbackQuery(/^plus_buy_(.+)$/, async (ctx) => {
     const userId = ctx.from.id;
+    const username = ctx.from.username;
+    const firstName = ctx.from.first_name;
     const planId = ctx.match[1];
     const plan = plans.getById(planId);
     if (!plan) {
         return ctx.answerCallbackQuery({ text: "❌ Тариф не найден", show_alert: true });
     }
-    // Создаём платёж (в тестовом режиме сразу подтверждаем)
-    const paymentId = payments.create(userId, 'plus', plan.duration_days, plan.stars);
-    const result = payments.confirm(paymentId);
-    const untilStr = new Date(result.newPlusUntil).toLocaleDateString("ru-RU", {
-        day: "numeric",
-        month: "long",
-        year: "numeric"
-    });
-    await ctx.answerCallbackQuery({ text: `✅ Plus активирован на ${plan.duration_days} дней!`, show_alert: true });
-    await ctx.reply(`🎉 *Plus активирован!*\n\n` +
-        `Действует до: *${untilStr}*\n\n` +
-        `Теперь вы можете делать безлимитные реролы с лучшими прокси!`, { parse_mode: "Markdown" });
+    // Создаём реальный платёж через Telegram Stars
+    try {
+        const invoice = await ctx.api.sendInvoice(userId, `Plus подписка на ${plan.duration_days} дней`, `Безлимитные реролы с КД 7 сек, лучшие прокси по рейтингу`, JSON.stringify({ planId, userId }), // payload для идентификации
+        "XTR", // Telegram Stars
+        [{ label: `Plus ${plan.duration_days} дней`, amount: plan.stars }], {
+            start_parameter: `plus_${planId}`,
+            photo_url: "https://i.imgur.com/placeholder.jpg", // можно добавить картинку
+            photo_width: 512,
+            photo_height: 512,
+            need_name: false,
+            need_phone_number: false,
+            need_email: false,
+            need_shipping_address: false,
+            send_phone_number_to_provider: false,
+            send_email_to_provider: false,
+            is_flexible: false
+        });
+        // Создаём запись о платеже в БД
+        const paymentId = payments.create(userId, 'plus', plan.duration_days, plan.stars, JSON.stringify({ planId, userId }));
+        await ctx.answerCallbackQuery({ text: `💳 Счёт на ${plan.stars} ⭐ отправлен!` });
+    }
+    catch (error) {
+        console.error(`[PAYMENT ERROR] Failed to create invoice for user ${userId}:`, error);
+        await ctx.answerCallbackQuery({ text: "❌ Ошибка создания счёта. Попробуйте позже.", show_alert: true });
+    }
 });
 // ─── Профиль ──────────────────────────────────────────────────────────────────
 bot.callbackQuery("profile", async (ctx) => {
@@ -353,6 +378,59 @@ bot.callbackQuery("profile", async (ctx) => {
         `• Сортируем по рейтингу пользователей\n` +
         `• Plus получает лучшие прокси первыми`, { parse_mode: "Markdown", reply_markup: buildProfileMenu() });
     await ctx.answerCallbackQuery();
+});
+// ─── Обработка платежей ──────────────────────────────────────────────────────
+// Обработка успешного платежа
+bot.on("pre_checkout_query", async (ctx) => {
+    // Всегда подтверждаем платёж (можно добавить дополнительные проверки)
+    await ctx.answerPreCheckoutQuery(true);
+});
+// Обработка завершённого платежа
+bot.on("message:successful_payment", async (ctx) => {
+    const payment = ctx.message.successful_payment;
+    const userId = ctx.from.id;
+    const username = ctx.from.username;
+    const firstName = ctx.from.first_name;
+    try {
+        const payloadData = JSON.parse(payment.invoice_payload);
+        const planId = payloadData.planId;
+        const plan = plans.getById(planId);
+        if (!plan) {
+            console.error(`[PAYMENT ERROR] Plan not found: ${planId}`);
+            return;
+        }
+        // Находим платёж в БД и подтверждаем его
+        const dbPayment = payments.getByPayload(payment.invoice_payload);
+        if (dbPayment) {
+            const result = payments.confirm(dbPayment.id);
+            const untilStr = new Date(result.newPlusUntil).toLocaleDateString("ru-RU", {
+                day: "numeric",
+                month: "long",
+                year: "numeric"
+            });
+            // Отправляем уведомление пользователю
+            await ctx.reply(`🎉 *Платёж успешно обработан!*\n\n` +
+                `⭐ Plus подписка активирована на ${plan.duration_days} дней\n` +
+                `📅 Действует до: *${untilStr}*\n\n` +
+                `Теперь вы можете делать безлимитные реролы с лучшими прокси!`, { parse_mode: "Markdown" });
+            // Отправляем уведомление админу
+            await notifyPurchase({
+                userId,
+                username,
+                firstName,
+                planId,
+                duration: plan.duration_days,
+                stars: plan.stars,
+                timestamp: new Date()
+            });
+        }
+        else {
+            console.error(`[PAYMENT ERROR] Payment not found in DB for payload: ${payment.invoice_payload}`);
+        }
+    }
+    catch (error) {
+        console.error(`[PAYMENT ERROR] Failed to process successful payment:`, error);
+    }
 });
 // ─── Помощь ───────────────────────────────────────────────────────────────────
 bot.callbackQuery("help", async (ctx) => {
