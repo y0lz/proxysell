@@ -32,6 +32,9 @@ db.exec(`
     status     TEXT NOT NULL DEFAULT 'unchecked',
     ping_ms    INTEGER,
     country    TEXT,
+    likes      INTEGER NOT NULL DEFAULT 0,
+    dislikes   INTEGER NOT NULL DEFAULT 0,
+    fires      INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
