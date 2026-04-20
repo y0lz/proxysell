@@ -13,16 +13,22 @@ const db = new Database(DB_PATH);
 
 // WAL-режим — снижает блокировки при параллельных чтениях/записях
 db.pragma("journal_mode = WAL");
+// Включаем foreign keys
+db.pragma("foreign_keys = ON");
 
 // ─── Схема ────────────────────────────────────────────────────────────────────
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    id        INTEGER PRIMARY KEY,
-    is_vip    INTEGER NOT NULL DEFAULT 0,
-    vip_until TEXT,
-    last_free TEXT,
-    joined_at TEXT NOT NULL DEFAULT (datetime('now'))
+    id            INTEGER PRIMARY KEY,
+    username      TEXT,
+    first_name    TEXT,
+    plan          TEXT NOT NULL DEFAULT 'free', -- 'free' | 'vip' | 'vip_plus'
+    vip_until     TEXT,
+    sub_notified  INTEGER NOT NULL DEFAULT 0,
+    last_free_at  TEXT,
+    last_proxy_id INTEGER,
+    joined_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS proxies (
@@ -37,34 +43,91 @@ db.exec(`
     fires      INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-`);
 
-try { db.exec(`ALTER TABLE users ADD COLUMN vip_until TEXT`); } catch { /* уже есть */ }
-try { db.exec(`ALTER TABLE proxies ADD COLUMN country TEXT`); } catch { /* уже есть */ }
-
-// Таблица репутации прокси
-db.exec(`
   CREATE TABLE IF NOT EXISTS proxy_votes (
-    proxy_id  INTEGER NOT NULL,
-    user_id   INTEGER NOT NULL,
-    vote      TEXT NOT NULL, -- 'like' | 'dislike' | 'fire'
+    proxy_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    vote       TEXT NOT NULL, -- 'like' | 'dislike' | 'fire'
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (proxy_id, user_id)
+    PRIMARY KEY (proxy_id, user_id),
+    FOREIGN KEY (proxy_id) REFERENCES proxies(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS plans (
+    id            TEXT PRIMARY KEY, -- 'vip_1m' | 'vip_3m' | 'vip_plus_1m' и т.д.
+    name          TEXT NOT NULL,
+    plan_type     TEXT NOT NULL, -- 'vip' | 'vip_plus'
+    price_rub     INTEGER NOT NULL,
+    price_stars   INTEGER,
+    duration_days INTEGER NOT NULL,
+    proxy_limit   INTEGER NOT NULL DEFAULT 1, -- прокси в день
+    reroll_enabled INTEGER NOT NULL DEFAULT 0, -- 0 = нет, 1 = да
+    description   TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS payments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL,
+    plan_id         TEXT NOT NULL,
+    amount          INTEGER NOT NULL,
+    provider        TEXT NOT NULL, -- 'stars' | 'crypto' | 'card'
+    invoice_payload TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'paid' | 'failed' | 'refunded'
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    paid_at         TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (plan_id) REFERENCES plans(id)
   );
 `);
 
-// Добавляем счётчики репутации в proxies если нет
+// Миграция старых колонок
+try { db.exec(`ALTER TABLE users ADD COLUMN username TEXT`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN first_name TEXT`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN sub_notified INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN last_free_at TEXT`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE users ADD COLUMN last_proxy_id INTEGER`); } catch { /* уже есть */ }
-try { db.exec(`ALTER TABLE proxies ADD COLUMN dislikes INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
-try { db.exec(`ALTER TABLE proxies ADD COLUMN fires INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+
+// Создаём индексы для производительности
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_users_vip_until ON users(vip_until);
+  CREATE INDEX IF NOT EXISTS idx_proxies_status_type ON proxies(status, type);
+  CREATE INDEX IF NOT EXISTS idx_proxies_updated_at ON proxies(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
+  CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+`);
+
+// Заполняем справочник тарифов если пустой
+const planCount = db.prepare(`SELECT COUNT(*) as count FROM plans`).get() as { count: number };
+if (planCount.count === 0) {
+    const insertPlan = db.prepare(`
+        INSERT INTO plans (id, name, plan_type, price_rub, price_stars, duration_days, proxy_limit, reroll_enabled, description)
+        VALUES (@id, @name, @plan_type, @price_rub, @price_stars, @duration_days, @proxy_limit, @reroll_enabled, @description)
+    `);
+    
+    const defaultPlans = [
+        { id: 'vip_1m', name: 'VIP 1 месяц', plan_type: 'vip', price_rub: 299, price_stars: 150, duration_days: 30, proxy_limit: 5, reroll_enabled: 1, description: 'Базовый VIP' },
+        { id: 'vip_3m', name: 'VIP 3 месяца', plan_type: 'vip', price_rub: 799, price_stars: 400, duration_days: 90, proxy_limit: 5, reroll_enabled: 1, description: 'VIP на 3 месяца' },
+        { id: 'vip_plus_1m', name: 'VIP+ 1 месяц', plan_type: 'vip_plus', price_rub: 499, price_stars: 250, duration_days: 30, proxy_limit: 999, reroll_enabled: 1, description: 'Безлимитные прокси' },
+        { id: 'vip_plus_3m', name: 'VIP+ 3 месяца', plan_type: 'vip_plus', price_rub: 1299, price_stars: 650, duration_days: 90, proxy_limit: 999, reroll_enabled: 1, description: 'VIP+ на 3 месяца' },
+    ];
+    
+    for (const plan of defaultPlans) {
+        insertPlan.run(plan);
+    }
+}
 
 // ─── Типы ─────────────────────────────────────────────────────────────────────
 
 export interface User {
     id: number;
-    is_vip: number;
+    username: string | null;
+    first_name: string | null;
+    plan: 'free' | 'vip' | 'vip_plus';
     vip_until: string | null;
-    last_free: string | null;
+    sub_notified: number;
+    last_free_at: string | null;
     last_proxy_id: number | null;
     joined_at: string;
 }
@@ -82,45 +145,216 @@ export interface Proxy {
     updated_at: string;
 }
 
+export interface Plan {
+    id: string;
+    name: string;
+    plan_type: 'vip' | 'vip_plus';
+    price_rub: number;
+    price_stars: number | null;
+    duration_days: number;
+    proxy_limit: number;
+    reroll_enabled: number;
+    description: string | null;
+}
+
+export interface Payment {
+    id: number;
+    user_id: number;
+    plan_id: string;
+    amount: number;
+    provider: 'stars' | 'crypto' | 'card';
+    invoice_payload: string | null;
+    status: 'pending' | 'paid' | 'failed' | 'refunded';
+    created_at: string;
+    paid_at: string | null;
+}
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 
 const stmtUpsertUser = db.prepare(`
-  INSERT INTO users (id) VALUES (@id)
-  ON CONFLICT(id) DO NOTHING
+  INSERT INTO users (id, username, first_name) 
+  VALUES (@id, @username, @first_name)
+  ON CONFLICT(id) DO UPDATE SET 
+    username = @username,
+    first_name = @first_name
 `);
 
 const stmtGetUser = db.prepare<[number], User>(`
   SELECT * FROM users WHERE id = ?
 `);
 
-const stmtSetLastFree = db.prepare(`
-  UPDATE users SET last_free = datetime('now') WHERE id = ?
-`);
-
-const stmtSetVip = db.prepare(`
-  UPDATE users SET is_vip = 1, vip_until = @vip_until WHERE id = @id
+const stmtSetLastFreeAt = db.prepare(`
+  UPDATE users SET last_free_at = datetime('now') WHERE id = ?
 `);
 
 const stmtSetLastProxyId = db.prepare(`
   UPDATE users SET last_proxy_id = ? WHERE id = ?
 `);
 
-const stmtExpireVip = db.prepare(`
-  UPDATE users SET is_vip = 0, vip_until = NULL
+// Проверка истечения подписок
+const stmtExpireSubscriptions = db.prepare(`
+  UPDATE users 
+  SET plan = 'free', vip_until = NULL, sub_notified = 0
   WHERE vip_until IS NOT NULL AND vip_until < datetime('now')
 `);
 
+// Получить пользователей для уведомления (подписка истекает через 24ч)
+const stmtGetUsersForNotification = db.prepare<[], User>(`
+  SELECT * FROM users
+  WHERE vip_until IS NOT NULL
+    AND sub_notified = 0
+    AND datetime(vip_until) BETWEEN datetime('now', '+23 hours') AND datetime('now', '+25 hours')
+`);
+
+const stmtSetSubNotified = db.prepare(`
+  UPDATE users SET sub_notified = 1 WHERE id = ?
+`);
+
+const stmtResetSubNotified = db.prepare(`
+  UPDATE users SET sub_notified = 0 WHERE id = ?
+`);
+
 export const users = {
-    upsert: (id: number) => stmtUpsertUser.run({ id }),
+    upsert: (id: number, username?: string, first_name?: string) => 
+        stmtUpsertUser.run({ id, username: username ?? null, first_name: first_name ?? null }),
+    
     get: (id: number): User | undefined => stmtGetUser.get(id),
-    setLastFree: (id: number) => stmtSetLastFree.run(id),
-    // daysCount — сколько дней VIP (1, 7, 30 и т.д.)
-    setVip: (id: number, daysCount: number) => {
-        const vip_until = new Date(Date.now() + daysCount * 86400_000).toISOString();
-        stmtSetVip.run({ id, vip_until });
-    },
-    expireVip: () => stmtExpireVip.run(),
+    
+    setLastFreeAt: (id: number) => stmtSetLastFreeAt.run(id),
+    
     setLastProxyId: (userId: number, proxyId: number) => stmtSetLastProxyId.run(proxyId, userId),
+    
+    // Истечение подписок
+    expireSubscriptions: () => stmtExpireSubscriptions.run(),
+    
+    // Уведомления о подписке
+    getUsersForNotification: (): User[] => stmtGetUsersForNotification.all(),
+    
+    setSubNotified: (id: number) => stmtSetSubNotified.run(id),
+    
+    resetSubNotified: (id: number) => stmtResetSubNotified.run(id),
+    
+    // Проверка VIP статуса
+    isVip: (user: User): boolean => {
+        if (user.plan === 'free') return false;
+        if (!user.vip_until) return false;
+        return new Date(user.vip_until) > new Date();
+    },
+    
+    // Проверка лимита бесплатных прокси (1 раз в 24ч)
+    canGetFreeProxy: (user: User): boolean => {
+        if (!user.last_free_at) return true;
+        const lastFree = new Date(user.last_free_at);
+        const now = new Date();
+        return (now.getTime() - lastFree.getTime()) >= 24 * 60 * 60 * 1000;
+    },
+};
+
+// ─── Plans ────────────────────────────────────────────────────────────────────
+
+const stmtGetAllPlans = db.prepare<[], Plan>(`SELECT * FROM plans ORDER BY price_rub ASC`);
+const stmtGetPlanById = db.prepare<[string], Plan>(`SELECT * FROM plans WHERE id = ?`);
+
+export const plans = {
+    getAll: (): Plan[] => stmtGetAllPlans.all(),
+    getById: (id: string): Plan | undefined => stmtGetPlanById.get(id),
+};
+
+// ─── Payments ─────────────────────────────────────────────────────────────────
+
+const stmtCreatePayment = db.prepare(`
+  INSERT INTO payments (user_id, plan_id, amount, provider, invoice_payload, status)
+  VALUES (@user_id, @plan_id, @amount, @provider, @invoice_payload, @status)
+`);
+
+const stmtGetPaymentById = db.prepare<[number], Payment>(`
+  SELECT * FROM payments WHERE id = ?
+`);
+
+const stmtGetPaymentByInvoice = db.prepare<[string], Payment>(`
+  SELECT * FROM payments WHERE invoice_payload = ?
+`);
+
+const stmtUpdatePaymentStatus = db.prepare(`
+  UPDATE payments 
+  SET status = @status, paid_at = CASE WHEN @status = 'paid' THEN datetime('now') ELSE paid_at END
+  WHERE id = @id
+`);
+
+const stmtGetUserPayments = db.prepare<[number], Payment>(`
+  SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC
+`);
+
+// Подтверждение оплаты — транзакция: обновить payment + продлить подписку
+const confirmPayment = db.transaction((paymentId: number) => {
+    const payment = stmtGetPaymentById.get(paymentId);
+    if (!payment || payment.status !== 'pending') {
+        throw new Error('Payment not found or already processed');
+    }
+    
+    const plan = stmtGetPlanById.get(payment.plan_id);
+    if (!plan) {
+        throw new Error('Plan not found');
+    }
+    
+    const user = stmtGetUser.get(payment.user_id);
+    if (!user) {
+        throw new Error('User not found');
+    }
+    
+    // Обновляем статус платежа
+    stmtUpdatePaymentStatus.run({ id: paymentId, status: 'paid' });
+    
+    // Продлеваем подписку
+    let newVipUntil: Date;
+    if (user.vip_until && new Date(user.vip_until) > new Date()) {
+        // Если подписка активна — прибавляем к текущей дате
+        newVipUntil = new Date(user.vip_until);
+        newVipUntil.setDate(newVipUntil.getDate() + plan.duration_days);
+    } else {
+        // Если подписки нет или истекла — начинаем с текущей даты
+        newVipUntil = new Date();
+        newVipUntil.setDate(newVipUntil.getDate() + plan.duration_days);
+    }
+    
+    // Обновляем пользователя
+    db.prepare(`
+        UPDATE users 
+        SET plan = @plan, vip_until = @vip_until, sub_notified = 0
+        WHERE id = @id
+    `).run({
+        id: payment.user_id,
+        plan: plan.plan_type,
+        vip_until: newVipUntil.toISOString(),
+    });
+    
+    return { payment, plan, newVipUntil };
+});
+
+export const payments = {
+    create: (user_id: number, plan_id: string, amount: number, provider: 'stars' | 'crypto' | 'card', invoice_payload?: string) => {
+        const result = stmtCreatePayment.run({
+            user_id,
+            plan_id,
+            amount,
+            provider,
+            invoice_payload: invoice_payload ?? null,
+            status: 'pending',
+        });
+        return result.lastInsertRowid as number;
+    },
+    
+    getById: (id: number): Payment | undefined => stmtGetPaymentById.get(id),
+    
+    getByInvoice: (invoice_payload: string): Payment | undefined => stmtGetPaymentByInvoice.get(invoice_payload),
+    
+    updateStatus: (id: number, status: 'paid' | 'failed' | 'refunded') => 
+        stmtUpdatePaymentStatus.run({ id, status }),
+    
+    getUserPayments: (user_id: number): Payment[] => stmtGetUserPayments.all(user_id),
+    
+    // Подтверждение оплаты с продлением подписки (транзакция)
+    confirm: confirmPayment,
 };
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
@@ -152,13 +386,30 @@ const stmtGetVipProxy = db.prepare<[string], Proxy>(`
   LIMIT 1
 `);
 
-// Следующий прокси для reroll — исключаем последний показанный пользователю
-const stmtGetNextProxy = db.prepare<[string, number], Proxy>(`
+// Следующий прокси для reroll — исключаем массив ID
+const stmtGetNextProxy = db.prepare<[string], Proxy>(`
   SELECT * FROM proxies
-  WHERE status = 'active' AND type = ? AND id != ?
+  WHERE status = 'active' AND type = ?
   ORDER BY likes DESC, RANDOM()
   LIMIT 1
 `);
+
+// Функция для получения следующего прокси с исключением массива ID
+function getNextProxyExcluding(type: string, excludeIds: number[]): Proxy | undefined {
+    if (excludeIds.length === 0) {
+        return stmtGetNextProxy.get(type);
+    }
+    
+    const placeholders = excludeIds.map(() => '?').join(',');
+    const query = `
+        SELECT * FROM proxies
+        WHERE status = 'active' AND type = ? AND id NOT IN (${placeholders})
+        ORDER BY likes DESC, RANDOM()
+        LIMIT 1
+    `;
+    const stmt = db.prepare<[string, ...number[]], Proxy>(query);
+    return stmt.get(type, ...excludeIds);
+}
 
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
   SELECT * FROM proxies WHERE status = 'unchecked'
@@ -207,7 +458,11 @@ export const proxies = {
     getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
     getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
     getVipProxy: (type: string): Proxy | undefined => stmtGetVipProxy.get(type),
-    getNextProxy: (type: string, excludeId: number): Proxy | undefined => stmtGetNextProxy.get(type, excludeId),
+    
+    // Получить следующий прокси с исключением массива ID (для реролла)
+    getNextProxy: (type: string, excludeIds: number[] = []): Proxy | undefined => 
+        getNextProxyExcluding(type, excludeIds),
+    
     getById: (id: number): Proxy | undefined => stmtGetById.get(id),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
     setStatus: (id: number, status: string, ping_ms: number | null) =>

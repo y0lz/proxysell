@@ -4,3 +4,13 @@ node_modules/
 *.db-shm
 *.db-wal
 dist/
+
+# Документация (локальная)
+CHANGELOG.md
+DATABASE.md
+DB_SCHEMA.md
+EXAMPLES.md
+MIGRATION_GUIDE.md
+QUICK_START.md
+README_SUBSCRIPTION_UPDATE.md
+SUMMARY.md

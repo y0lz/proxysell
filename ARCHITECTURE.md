@@ -175,11 +175,46 @@ VIP нажимает 🔄
 | Поле | Тип | Описание |
 |---|---|---|
 | id | INTEGER PK | Telegram user_id |
-| is_vip | INTEGER | 0 = free, 1 = VIP |
-| vip_until | TEXT | ISO-8601, когда истекает VIP |
-| last_free | TEXT | Когда последний раз брал прокси (лимит) |
+| username | TEXT | Telegram username |
+| first_name | TEXT | Имя пользователя |
+| plan | TEXT | 'free' / 'vip' / 'vip_plus' |
+| vip_until | TEXT | ISO-8601, когда истекает подписка |
+| sub_notified | INTEGER | 0/1 — флаг что уведомление о истечении отправлено |
+| last_free_at | TEXT | Когда последний раз брал бесплатный прокси (лимит 24ч) |
 | last_proxy_id | INTEGER | ID последнего показанного прокси (для реролла) |
 | joined_at | TEXT | Дата первого /start |
+
+**Индексы:** `idx_users_vip_until` для планировщика уведомлений.
+
+### Таблица `plans` (справочник тарифов)
+
+| Поле | Тип | Описание |
+|---|---|---|
+| id | TEXT PK | 'vip_1m', 'vip_3m', 'vip_plus_1m' и т.д. |
+| name | TEXT | Название тарифа |
+| plan_type | TEXT | 'vip' / 'vip_plus' |
+| price_rub | INTEGER | Цена в рублях |
+| price_stars | INTEGER | Цена в Telegram Stars |
+| duration_days | INTEGER | Длительность подписки в днях |
+| proxy_limit | INTEGER | Лимит прокси в день (999 = безлимит) |
+| reroll_enabled | INTEGER | 0/1 — доступен ли реролл |
+| description | TEXT | Описание тарифа |
+
+### Таблица `payments`
+
+| Поле | Тип | Описание |
+|---|---|---|
+| id | INTEGER PK | Автоинкремент |
+| user_id | INTEGER FK | → users.id |
+| plan_id | TEXT FK | → plans.id |
+| amount | INTEGER | Сумма платежа |
+| provider | TEXT | 'stars' / 'crypto' / 'card' |
+| invoice_payload | TEXT | Для Telegram Stars (идентификатор инвойса) |
+| status | TEXT | 'pending' / 'paid' / 'failed' / 'refunded' |
+| created_at | TEXT | Дата создания |
+| paid_at | TEXT | Дата оплаты |
+
+**Индексы:** `idx_payments_user_id`, `idx_payments_status`.
 
 ### Таблица `proxies`
 
@@ -196,16 +231,18 @@ VIP нажимает 🔄
 | country | TEXT | Страна (не используется активно) |
 | updated_at | TEXT | Время последнего изменения статуса |
 
+**Индексы:** `idx_proxies_status_type` для выдачи, `idx_proxies_updated_at` для очистки.
+
 ### Таблица `proxy_votes`
 
 | Поле | Тип | Описание |
 |---|---|---|
-| proxy_id | INTEGER | FK → proxies.id |
-| user_id | INTEGER | Telegram user_id |
+| proxy_id | INTEGER FK | → proxies.id (ON DELETE CASCADE) |
+| user_id | INTEGER FK | → users.id (ON DELETE CASCADE) |
 | vote | TEXT | like / dislike / fire |
 | created_at | TEXT | Время голоса |
 
-PRIMARY KEY (proxy_id, user_id) — один голос на пару.
+PRIMARY KEY (proxy_id, user_id) — один голос на пару, можно менять.
 
 ### Жизненный цикл прокси
 
@@ -225,6 +262,32 @@ scraper добавляет
 
 [active] ──── каждые 4ч ────► [unchecked] (перепроверка)
 [active] ──── 5+ дизлайков ──► [dead]
+```
+
+### Жизненный цикл подписки
+
+```
+Пользователь покупает подписку
+        │
+        ▼
+   payments (status='pending')
+        │
+        ├── Оплата подтверждена (webhook)
+        │
+        ▼
+   payments (status='paid') + users.plan обновлён
+        │
+        ├── Если подписка активна → vip_until += duration_days
+        └── Если подписки нет → vip_until = now + duration_days
+        │
+        └── sub_notified = 0 (сброс флага уведомления)
+
+Планировщик каждый час:
+    ├── Проверяет vip_until через 24ч И sub_notified=0
+    │       └── Отправляет уведомление → sub_notified=1
+    │
+    └── Проверяет vip_until < now
+            └── plan='free', vip_until=NULL, sub_notified=0
 ```
 
 ---
@@ -258,7 +321,8 @@ scraper добавляет
 |---|---|
 | Старт + каждые 2ч | Скрапинг всех источников |
 | Каждые 30 мин | NL fallback чекер (только SOCKS5, MTProto пропускает) |
-| Каждый час | Истечение VIP подписок |
+| Каждый час | Истечение подписок (plan='free', vip_until=NULL) |
+| Каждый час | Уведомления о подписке (за 24ч до истечения) |
 | Каждые 4ч | Сброс активных прокси старше 4ч на перепроверку |
 
 ## Планировщики (RU агент)

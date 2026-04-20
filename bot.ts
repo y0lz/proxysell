@@ -1,15 +1,11 @@
 // bot.ts
 import { Bot, InlineKeyboard } from "grammy";
-import { users, proxies } from "./db.js";
-import type { Proxy } from "./db.js";
+import { users, proxies, plans, payments } from "./db.js";
+import type { Proxy, User } from "./db.js";
 
 export const bot = new Bot(process.env["BOT_TOKEN"] ?? "");
 
 // ─── Хелперы ──────────────────────────────────────────────────────────────────
-
-function isVipActive(user: { is_vip: number; vip_until: string | null }): boolean {
-    return user.is_vip === 1 && user.vip_until != null && new Date(user.vip_until) > new Date();
-}
 
 function proxyMessage(proxy: Proxy): string {
     const ping = proxy.ping_ms ? ` · ${proxy.ping_ms}ms` : "";
@@ -35,7 +31,12 @@ function buildProxyKeyboard(proxy: Proxy, isVip: boolean): InlineKeyboard {
 
 bot.command("start", async (ctx) => {
     const userId = ctx.from?.id;
-    if (userId) users.upsert(userId);
+    const username = ctx.from?.username;
+    const firstName = ctx.from?.first_name;
+    
+    if (userId) {
+        users.upsert(userId, username, firstName);
+    }
 
     const keyboard = new InlineKeyboard()
         .text("🟩 Получить прокси", "get_free").row()
@@ -57,11 +58,9 @@ bot.callbackQuery("get_free", async (ctx) => {
     const user = users.get(userId);
     if (!user) return ctx.answerCallbackQuery();
 
-    const vip = isVipActive(user);
-    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-    const lastFreeMs = user.last_free ? new Date(user.last_free).getTime() : 0;
+    const vip = users.isVip(user);
 
-    if (!vip && Date.now() - lastFreeMs < ONE_DAY_MS) {
+    if (!vip && !users.canGetFreeProxy(user)) {
         return ctx.answerCallbackQuery({
             text: "⏳ Дневной лимит исчерпан. Возвращайтесь завтра или купите VIP!",
             show_alert: true,
@@ -80,7 +79,7 @@ bot.callbackQuery("get_free", async (ctx) => {
         });
     }
 
-    if (!vip) users.setLastFree(userId);
+    if (!vip) users.setLastFreeAt(userId);
     users.setLastProxyId(userId, proxy.id);
 
     await ctx.reply(proxyMessage(proxy), {
@@ -96,13 +95,13 @@ bot.callbackQuery(/^reroll_(\d+)$/, async (ctx) => {
     const userId = ctx.from.id;
     const user = users.get(userId);
 
-    if (!user || !isVipActive(user)) {
+    if (!user || !users.isVip(user)) {
         return ctx.answerCallbackQuery({ text: "❌ Только для VIP.", show_alert: true });
     }
 
     // Исключаем последний показанный прокси
     const excludeId = user.last_proxy_id ?? parseInt(ctx.match[1]!, 10);
-    const proxy = proxies.getNextProxy("MTPROTO", excludeId);
+    const proxy = proxies.getNextProxy("MTPROTO", [excludeId]);
 
     if (!proxy) {
         return ctx.answerCallbackQuery({
@@ -138,32 +137,49 @@ bot.callbackQuery(/^vote_(like|dislike|fire)_(\d+)$/, async (ctx) => {
 bot.callbackQuery("buy_vip", async (ctx) => {
     await ctx.answerCallbackQuery();
 
-    const keyboard = new InlineKeyboard()
-        .text("📅 1 день — 29₽ (тест)", "vip_buy_1").row()
-        .text("📅 7 дней — 149₽ (тест)", "vip_buy_7").row()
-        .text("📅 30 дней — 399₽ (тест)", "vip_buy_30");
+    const allPlans = plans.getAll();
+    const keyboard = new InlineKeyboard();
+    
+    for (const plan of allPlans) {
+        const emoji = plan.plan_type === 'vip_plus' ? '⭐' : '📅';
+        const price = plan.price_stars ? `${plan.price_stars} ⭐` : `${plan.price_rub}₽`;
+        keyboard.text(`${emoji} ${plan.name} — ${price}`, `vip_buy_${plan.id}`).row();
+    }
 
     await ctx.reply(
         "🚀 *VIP доступ*\n\n" +
-        "• Безлимитные прокси без суточного ограничения\n" +
-        "• Прокси с лучшей репутацией в первую очередь\n" +
-        "• Кнопка 🔄 для мгновенной смены прокси\n\n" +
-        "⚠️ Сейчас оплата в тестовом режиме — подписка активируется бесплатно.",
-        { parse_mode: "Markdown", reply_markup: keyboard }
+        "• *VIP:* 5 прокси в день, реролл, лучшая репутация\n" +
+        "• *VIP\\+:* безлимитные прокси, реролл, приоритет\n\n" +
+        "⚠️ Сейчас оплата в тестовом режиме — подписка активируется бесплатно\\.",
+        { parse_mode: "MarkdownV2", reply_markup: keyboard }
     );
 });
 
-bot.callbackQuery(/^vip_buy_(\d+)$/, async (ctx) => {
+bot.callbackQuery(/^vip_buy_(.+)$/, async (ctx) => {
     const userId = ctx.from.id;
-    const days = parseInt(ctx.match[1]!, 10);
-    users.setVip(userId, days);
+    const planId = ctx.match[1]!;
+    const plan = plans.getById(planId);
+    
+    if (!plan) {
+        return ctx.answerCallbackQuery({ text: "❌ Тариф не найден", show_alert: true });
+    }
 
-    const until = new Date(Date.now() + days * 86400_000);
-    const untilStr = until.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+    // Создаём платёж (в тестовом режиме сразу подтверждаем)
+    const paymentId = payments.create(userId, plan.id, plan.price_rub, 'stars');
+    const result = payments.confirm(paymentId);
 
-    await ctx.answerCallbackQuery({ text: `✅ VIP активирован на ${days} дн.!`, show_alert: true });
+    const untilStr = new Date(result.newVipUntil).toLocaleDateString("ru-RU", { 
+        day: "numeric", 
+        month: "long", 
+        year: "numeric" 
+    });
+
+    await ctx.answerCallbackQuery({ text: `✅ ${plan.name} активирован!`, show_alert: true });
     await ctx.reply(
-        `🎉 *VIP активирован!*\n\nДействует до: *${untilStr}*\n\nТеперь вы можете получать прокси без ограничений и использовать кнопку 🔄 для смены.`,
+        `🎉 *${plan.name} активирован!*\n\n` +
+        `Действует до: *${untilStr}*\n\n` +
+        `Теперь вы можете получать прокси ${plan.proxy_limit === 999 ? 'без ограничений' : `до ${plan.proxy_limit} раз в день`} ` +
+        `и использовать кнопку 🔄 для смены.`,
         { parse_mode: "Markdown" }
     );
 });

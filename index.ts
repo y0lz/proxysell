@@ -156,8 +156,35 @@ void bootstrap();
 
 setInterval(() => { void scrapeProxies(); }, 2 * 60 * 60 * 1000);  // скрапинг каждые 2 часа
 setInterval(() => { void runChecker(); },   30 * 60 * 1000);        // NL fallback чекер каждые 30 мин
-setInterval(() => { users.expireVip(); },   60 * 60 * 1000);        // истечение VIP каждый час
-setInterval(() => {                                                   // перепроверка активных каждые 4 часа
+
+// Истечение подписок каждый час
+setInterval(() => { 
+    users.expireSubscriptions(); 
+}, 60 * 60 * 1000);
+
+// Уведомления о подписке (за 24ч до истечения) каждый час
+setInterval(async () => {
+    const usersToNotify = users.getUsersForNotification();
+    for (const user of usersToNotify) {
+        try {
+            await bot.api.sendMessage(
+                user.id,
+                "⚠️ *Подписка истекает завтра!*\n\n" +
+                "Ваша подписка закончится через 24 часа\\. " +
+                "Продлите её, чтобы продолжить пользоваться VIP\\-преимуществами\\.\n\n" +
+                "Нажмите /start → 🚀 Купить VIP доступ",
+                { parse_mode: "MarkdownV2" }
+            );
+            users.setSubNotified(user.id);
+            console.log(`[scheduler] Отправлено уведомление пользователю ${user.id}`);
+        } catch (err) {
+            console.error(`[scheduler] Ошибка отправки уведомления ${user.id}:`, err);
+        }
+    }
+}, 60 * 60 * 1000);
+
+// Перепроверка активных каждые 4 часа
+setInterval(() => {
     const reset = proxies.resetStaleActive(4);
     if (reset > 0) console.log(`[scheduler] Сброшено на перепроверку: ${reset} активных прокси`);
 }, 4 * 60 * 60 * 1000);
