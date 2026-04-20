@@ -227,6 +227,15 @@ export const proxies = {
     resetDeadMtproto: () => {
         db.prepare(`UPDATE proxies SET status='unchecked' WHERE type='MTPROTO' AND status='dead'`).run();
     },
+    // Сбрасываем активные прокси старше N часов на перепроверку
+    resetStaleActive: (olderThanHours = 6) => {
+        const result = db.prepare(`
+            UPDATE proxies SET status='unchecked'
+            WHERE status='active'
+            AND updated_at < datetime('now', '-${olderThanHours} hours')
+        `).run();
+        return result.changes;
+    },
     countByStatus: (status: string): number =>
         stmtCountByStatus.get(status)?.count ?? 0,
 };

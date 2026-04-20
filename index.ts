@@ -154,6 +154,10 @@ void bootstrap();
 
 // ─── Планировщики ─────────────────────────────────────────────────────────────
 
-setInterval(() => { void scrapeProxies(); }, 3 * 60 * 60 * 1000);
-setInterval(() => { void runChecker(); },   30 * 60 * 1000);
-setInterval(() => { users.expireVip(); },   60 * 60 * 1000);
+setInterval(() => { void scrapeProxies(); }, 2 * 60 * 60 * 1000);  // скрапинг каждые 2 часа
+setInterval(() => { void runChecker(); },   30 * 60 * 1000);        // NL fallback чекер каждые 30 мин
+setInterval(() => { users.expireVip(); },   60 * 60 * 1000);        // истечение VIP каждый час
+setInterval(() => {                                                   // перепроверка активных каждые 4 часа
+    const reset = proxies.resetStaleActive(4);
+    if (reset > 0) console.log(`[scheduler] Сброшено на перепроверку: ${reset} активных прокси`);
+}, 4 * 60 * 60 * 1000);
