@@ -83,7 +83,8 @@ bot.command("start", async (ctx) => {
             users.updateRerollData(userId, 0, null, null, [proxy.id]);
             
             await ctx.reply(
-                `Привет! Я Anti-Block Bot.\n\n` +
+                `ProxyRoll — бот с рабочими MTProto прокси для Telegram.\n\n` +
+                `Скрапим свежие прокси, проверяем их из России, сортируем по скорости и оценкам. 🥰\n\n` +
                 `Вот твой первый прокси (средний по рейтингу):\n\n` +
                 `${proxyMessage(proxy)}`,
                 {
@@ -98,8 +99,8 @@ bot.command("start", async (ctx) => {
     const keyboard = buildMainMenu();
 
     await ctx.reply(
-        "Привет! Я Anti-Block Bot.\n\n" +
-        "Собираю быстрые MTProto прокси для обхода блокировок Telegram.\n" +
+        "ProxyRoll — бот с рабочими MTProto прокси для Telegram.\n\n" +
+        "Скрапим свежие прокси, проверяем их из России, сортируем по скорости и оценкам. 🥰\n\n" +
         "Free: 3 реролла каждые 4 часа\n" +
         "Plus: безлимитные реролы с КД 7 сек",
         { reply_markup: keyboard }
@@ -110,8 +111,8 @@ bot.command("start", async (ctx) => {
 
 bot.callbackQuery("main_menu", async (ctx) => {
     await ctx.editMessageText(
-        "🏠 Главное меню\n\n" +
-        "Собираю быстрые MTProto прокси для обхода блокировок Telegram.\n" +
+        "ProxyRoll — бот с рабочими MTProto прокси для Telegram.\n\n" +
+        "Скрапим свежие прокси, проверяем их из России, сортируем по скорости и оценкам. 🥰\n\n" +
         "Free: 3 реролла каждые 4 часа\n" +
         "Plus: безлимитные реролы с КД 7 сек",
         { reply_markup: buildMainMenu() }
