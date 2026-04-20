@@ -14,16 +14,17 @@ function proxyMessage(proxy: Proxy): string {
     return `✅ MTProto прокси${ping}${rep}${fire}:\n\n\`${proxy.link}\`\n\nНажмите кнопку ниже — Telegram сразу предложит применить.`;
 }
 
-function buildProxyKeyboard(proxy: Proxy, isVip: boolean): InlineKeyboard {
+function buildProxyKeyboard(proxy: Proxy, isPlus: boolean): InlineKeyboard {
     const kb = new InlineKeyboard()
         .url("⚡ Применить прокси", proxy.link)
         .row()
         .text("👍", `vote_like_${proxy.id}`)
         .text("🔥", `vote_fire_${proxy.id}`)
         .text("👎", `vote_dislike_${proxy.id}`);
-    if (isVip) {
-        kb.row().text("🔄 Следующий прокси", `reroll_${proxy.id}`);
-    }
+    
+    // Реролл доступен всем, но с разными лимитами
+    kb.row().text("🔄 Следующий прокси", `reroll_${proxy.id}`);
+    
     return kb;
 }
 
@@ -36,41 +37,52 @@ bot.command("start", async (ctx) => {
     
     if (userId) {
         users.upsert(userId, username, firstName);
+        
+        // Для новых пользователей сразу предлагаем средний прокси
+        const user = users.get(userId);
+        if (user && JSON.parse(user.shown_proxy_ids).length === 0) {
+            const proxy = proxies.getProxyForNewUser();
+            if (proxy) {
+                // Добавляем в показанные
+                users.updateRerollData(userId, 0, null, null, [proxy.id]);
+                
+                await ctx.reply(
+                    `Привет! Я Anti-Block Bot.\n\n` +
+                    `Вот твой первый прокси (средний по рейтингу):\n\n` +
+                    `${proxyMessage(proxy)}`,
+                    {
+                        parse_mode: "Markdown",
+                        reply_markup: buildProxyKeyboard(proxy, false),
+                    }
+                );
+                return;
+            }
+        }
     }
 
     const keyboard = new InlineKeyboard()
-        .text("🟩 Получить прокси", "get_free").row()
-        .text("🚀 Купить VIP доступ", "buy_vip").row()
-        .text("❓ Помощь / Как настроить", "help");
+        .text("🟩 Получить прокси", "get_proxy").row()
+        .text("⭐ Купить Plus", "buy_plus").row()
+        .text("❓ Помощь", "help");
 
     await ctx.reply(
         "Привет! Я Anti-Block Bot.\n\n" +
         "Собираю быстрые MTProto прокси для обхода блокировок Telegram.\n" +
-        "Бесплатно — 1 прокси в сутки.",
+        "Free: 3 реролла каждые 4 часа\n" +
+        "Plus: безлимитные реролы с КД 10 сек",
         { reply_markup: keyboard }
     );
 });
 
 // ─── Получить прокси ──────────────────────────────────────────────────────────
 
-bot.callbackQuery("get_free", async (ctx) => {
+bot.callbackQuery("get_proxy", async (ctx) => {
     const userId = ctx.from.id;
     const user = users.get(userId);
     if (!user) return ctx.answerCallbackQuery();
 
-    const vip = users.isVip(user);
-
-    if (!vip && !users.canGetFreeProxy(user)) {
-        return ctx.answerCallbackQuery({
-            text: "⏳ Дневной лимит исчерпан. Возвращайтесь завтра или купите VIP!",
-            show_alert: true,
-        });
-    }
-
-    // VIP получает прокси с лучшей репутацией, обычный — просто активный
-    const proxy = vip
-        ? proxies.getVipProxy("MTPROTO")
-        : proxies.getFastActiveByType("MTPROTO");
+    const isPlus = users.isPlus(user);
+    const proxy = proxies.getNextProxy(userId);
 
     if (!proxy) {
         return ctx.answerCallbackQuery({
@@ -79,30 +91,45 @@ bot.callbackQuery("get_free", async (ctx) => {
         });
     }
 
-    if (!vip) users.setLastFreeAt(userId);
-    users.setLastProxyId(userId, proxy.id);
-
     await ctx.reply(proxyMessage(proxy), {
         parse_mode: "Markdown",
-        reply_markup: buildProxyKeyboard(proxy, vip),
+        reply_markup: buildProxyKeyboard(proxy, isPlus),
     });
     await ctx.answerCallbackQuery();
 });
 
-// ─── Реролл (только VIP) ─────────────────────────────────────────────────────
+// ─── Реролл ──────────────────────────────────────────────────────────────────
 
 bot.callbackQuery(/^reroll_(\d+)$/, async (ctx) => {
     const userId = ctx.from.id;
     const user = users.get(userId);
+    if (!user) return ctx.answerCallbackQuery();
 
-    if (!user || !users.isVip(user)) {
-        return ctx.answerCallbackQuery({ text: "❌ Только для VIP.", show_alert: true });
+    const isPlus = users.isPlus(user);
+    
+    // Проверяем возможность реролла
+    const rerollCheck = proxies.canReroll(userId);
+    if (!rerollCheck.allowed) {
+        let message = "";
+        if (rerollCheck.reason === 'cd') {
+            message = `⏳ Кулдаун реролла. Подождите ${rerollCheck.wait_sec} сек.`;
+        } else if (rerollCheck.reason === 'limit') {
+            const minutes = Math.ceil((rerollCheck.wait_sec || 0) / 60);
+            if (isPlus) {
+                message = `⏳ Лимит рероллов исчерпан (10 за 5 мин). Подождите ${minutes} мин.`;
+            } else {
+                const hours = Math.ceil(minutes / 60);
+                message = `⏳ Лимит рероллов исчерпан (3 за 4ч). Подождите ${hours}ч.`;
+            }
+        }
+        return ctx.answerCallbackQuery({ text: message, show_alert: true });
     }
 
-    // Исключаем последний показанный прокси
-    const excludeId = user.last_proxy_id ?? parseInt(ctx.match[1]!, 10);
-    const proxy = proxies.getNextProxy("MTPROTO", [excludeId]);
-
+    // Записываем реролл
+    proxies.recordReroll(userId);
+    
+    // Получаем следующий прокси
+    const proxy = proxies.getNextProxy(userId);
     if (!proxy) {
         return ctx.answerCallbackQuery({
             text: "😔 Больше нет активных прокси. Попробуйте позже.",
@@ -110,11 +137,9 @@ bot.callbackQuery(/^reroll_(\d+)$/, async (ctx) => {
         });
     }
 
-    users.setLastProxyId(userId, proxy.id);
-
     await ctx.editMessageText(proxyMessage(proxy), {
         parse_mode: "Markdown",
-        reply_markup: buildProxyKeyboard(proxy, true),
+        reply_markup: buildProxyKeyboard(proxy, isPlus),
     });
     await ctx.answerCallbackQuery();
 });
@@ -132,30 +157,29 @@ bot.callbackQuery(/^vote_(like|dislike|fire)_(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: labels[vote] });
 });
 
-// ─── VIP покупка ──────────────────────────────────────────────────────────────
+// ─── Plus покупка ─────────────────────────────────────────────────────────────
 
-bot.callbackQuery("buy_vip", async (ctx) => {
+bot.callbackQuery("buy_plus", async (ctx) => {
     await ctx.answerCallbackQuery();
 
     const allPlans = plans.getAll();
     const keyboard = new InlineKeyboard();
     
     for (const plan of allPlans) {
-        const emoji = plan.plan_type === 'vip_plus' ? '⭐' : '📅';
-        const price = plan.price_stars ? `${plan.price_stars} ⭐` : `${plan.price_rub}₽`;
-        keyboard.text(`${emoji} ${plan.name} — ${price}`, `vip_buy_${plan.id}`).row();
+        keyboard.text(`⭐ ${plan.duration_days} дней — ${plan.stars} ⭐`, `plus_buy_${plan.id}`).row();
     }
 
     await ctx.reply(
-        "🚀 *VIP доступ*\n\n" +
-        "• *VIP:* 5 прокси в день, реролл, лучшая репутация\n" +
-        "• *VIP\\+:* безлимитные прокси, реролл, приоритет\n\n" +
+        "⭐ *Plus подписка*\n\n" +
+        "• Безлимитные реролы (КД 10 сек, макс 10 за 5 мин)\n" +
+        "• Прокси с лучшим рейтингом в первую очередь\n" +
+        "• Приоритетная поддержка\n\n" +
         "⚠️ Сейчас оплата в тестовом режиме — подписка активируется бесплатно\\.",
         { parse_mode: "MarkdownV2", reply_markup: keyboard }
     );
 });
 
-bot.callbackQuery(/^vip_buy_(.+)$/, async (ctx) => {
+bot.callbackQuery(/^plus_buy_(.+)$/, async (ctx) => {
     const userId = ctx.from.id;
     const planId = ctx.match[1]!;
     const plan = plans.getById(planId);
@@ -165,21 +189,20 @@ bot.callbackQuery(/^vip_buy_(.+)$/, async (ctx) => {
     }
 
     // Создаём платёж (в тестовом режиме сразу подтверждаем)
-    const paymentId = payments.create(userId, plan.id, plan.price_rub, 'stars');
+    const paymentId = payments.create(userId, 'plus', plan.duration_days, plan.stars);
     const result = payments.confirm(paymentId);
 
-    const untilStr = new Date(result.newVipUntil).toLocaleDateString("ru-RU", { 
+    const untilStr = new Date(result.newPlusUntil).toLocaleDateString("ru-RU", { 
         day: "numeric", 
         month: "long", 
         year: "numeric" 
     });
 
-    await ctx.answerCallbackQuery({ text: `✅ ${plan.name} активирован!`, show_alert: true });
+    await ctx.answerCallbackQuery({ text: `✅ Plus активирован на ${plan.duration_days} дней!`, show_alert: true });
     await ctx.reply(
-        `🎉 *${plan.name} активирован!*\n\n` +
+        `🎉 *Plus активирован!*\n\n` +
         `Действует до: *${untilStr}*\n\n` +
-        `Теперь вы можете получать прокси ${plan.proxy_limit === 999 ? 'без ограничений' : `до ${plan.proxy_limit} раз в день`} ` +
-        `и использовать кнопку 🔄 для смены.`,
+        `Теперь вы можете делать безлимитные реролы с лучшими прокси!`,
         { parse_mode: "Markdown" }
     );
 });
@@ -193,8 +216,10 @@ bot.callbackQuery("help", async (ctx) => {
         "1\\. Нажмите *Получить прокси*\n" +
         "2\\. Нажмите кнопку *⚡ Применить прокси* — Telegram сам предложит добавить\n" +
         "3\\. Подтвердите в диалоге\n\n" +
-        "Если прокси не работает — нажмите 👎 и попробуйте снова\\.\n" +
-        "VIP\\-пользователи могут нажать 🔄 для мгновенной замены\\.",
+        "*Реролл прокси:*\n" +
+        "• Free: 3 реролла каждые 4 часа \\(случайные прокси\\)\n" +
+        "• Plus: безлимит с КД 10 сек \\(лучшие прокси\\)\n\n" +
+        "Если прокси не работает — нажмите 👎 и попробуйте снова\\.",
         { parse_mode: "MarkdownV2" }
     );
 });

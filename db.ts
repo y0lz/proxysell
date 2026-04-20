@@ -20,15 +20,17 @@ db.pragma("foreign_keys = ON");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    username      TEXT,
-    first_name    TEXT,
-    plan          TEXT NOT NULL DEFAULT 'free', -- 'free' | 'vip' | 'vip_plus'
-    vip_until     TEXT,
-    sub_notified  INTEGER NOT NULL DEFAULT 0,
-    last_free_at  TEXT,
-    last_proxy_id INTEGER,
-    joined_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    id                  INTEGER PRIMARY KEY,
+    username            TEXT,
+    first_name          TEXT,
+    plan                TEXT NOT NULL DEFAULT 'free', -- 'free' | 'plus'
+    plus_until          TEXT,
+    sub_notified        INTEGER NOT NULL DEFAULT 0,
+    reroll_count        INTEGER NOT NULL DEFAULT 0,
+    reroll_window_start TEXT,
+    last_reroll_at      TEXT,
+    shown_proxy_ids     TEXT NOT NULL DEFAULT '[]', -- JSON массив
+    joined_at           TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS proxies (
@@ -55,29 +57,25 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS plans (
-    id            TEXT PRIMARY KEY, -- 'vip_1m' | 'vip_3m' | 'vip_plus_1m' и т.д.
-    name          TEXT NOT NULL,
-    plan_type     TEXT NOT NULL, -- 'vip' | 'vip_plus'
-    price_rub     INTEGER NOT NULL,
-    price_stars   INTEGER,
-    duration_days INTEGER NOT NULL,
-    proxy_limit   INTEGER NOT NULL DEFAULT 1, -- прокси в день
-    reroll_enabled INTEGER NOT NULL DEFAULT 0, -- 0 = нет, 1 = да
-    description   TEXT
+    id                TEXT PRIMARY KEY, -- 'plus_10', 'plus_30', 'plus_60'
+    duration_days     INTEGER NOT NULL,
+    stars             INTEGER NOT NULL,
+    reroll_limit      INTEGER NOT NULL,
+    reroll_window_sec INTEGER NOT NULL,
+    reroll_cd_sec     INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS payments (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id         INTEGER NOT NULL,
-    plan_id         TEXT NOT NULL,
-    amount          INTEGER NOT NULL,
-    provider        TEXT NOT NULL, -- 'stars' | 'crypto' | 'card'
-    invoice_payload TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'paid' | 'failed' | 'refunded'
+    plan            TEXT NOT NULL, -- 'plus'
+    duration_days   INTEGER NOT NULL,
+    stars_amount    INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'paid' | 'failed'
+    payload         TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     paid_at         TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (plan_id) REFERENCES plans(id)
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 `);
 
@@ -85,14 +83,18 @@ db.exec(`
 try { db.exec(`ALTER TABLE users ADD COLUMN username TEXT`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE users ADD COLUMN first_name TEXT`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN plus_until TEXT`); } catch { /* уже есть */ }
 try { db.exec(`ALTER TABLE users ADD COLUMN sub_notified INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
-try { db.exec(`ALTER TABLE users ADD COLUMN last_free_at TEXT`); } catch { /* уже есть */ }
-try { db.exec(`ALTER TABLE users ADD COLUMN last_proxy_id INTEGER`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN reroll_count INTEGER NOT NULL DEFAULT 0`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN reroll_window_start TEXT`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN last_reroll_at TEXT`); } catch { /* уже есть */ }
+try { db.exec(`ALTER TABLE users ADD COLUMN shown_proxy_ids TEXT NOT NULL DEFAULT '[]'`); } catch { /* уже есть */ }
 
 // Создаём индексы для производительности
 db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_users_vip_until ON users(vip_until);
+  CREATE INDEX IF NOT EXISTS idx_users_plus_until ON users(plus_until);
   CREATE INDEX IF NOT EXISTS idx_proxies_status_type ON proxies(status, type);
+  CREATE INDEX IF NOT EXISTS idx_proxies_likes_ping ON proxies(likes, ping_ms);
   CREATE INDEX IF NOT EXISTS idx_proxies_updated_at ON proxies(updated_at);
   CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
   CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
@@ -102,15 +104,15 @@ db.exec(`
 const planCount = db.prepare(`SELECT COUNT(*) as count FROM plans`).get() as { count: number };
 if (planCount.count === 0) {
     const insertPlan = db.prepare(`
-        INSERT INTO plans (id, name, plan_type, price_rub, price_stars, duration_days, proxy_limit, reroll_enabled, description)
-        VALUES (@id, @name, @plan_type, @price_rub, @price_stars, @duration_days, @proxy_limit, @reroll_enabled, @description)
+        INSERT INTO plans (id, duration_days, stars, reroll_limit, reroll_window_sec, reroll_cd_sec)
+        VALUES (@id, @duration_days, @stars, @reroll_limit, @reroll_window_sec, @reroll_cd_sec)
     `);
     
     const defaultPlans = [
-        { id: 'vip_1m', name: 'VIP 1 месяц', plan_type: 'vip', price_rub: 299, price_stars: 150, duration_days: 30, proxy_limit: 5, reroll_enabled: 1, description: 'Базовый VIP' },
-        { id: 'vip_3m', name: 'VIP 3 месяца', plan_type: 'vip', price_rub: 799, price_stars: 400, duration_days: 90, proxy_limit: 5, reroll_enabled: 1, description: 'VIP на 3 месяца' },
-        { id: 'vip_plus_1m', name: 'VIP+ 1 месяц', plan_type: 'vip_plus', price_rub: 499, price_stars: 250, duration_days: 30, proxy_limit: 999, reroll_enabled: 1, description: 'Безлимитные прокси' },
-        { id: 'vip_plus_3m', name: 'VIP+ 3 месяца', plan_type: 'vip_plus', price_rub: 1299, price_stars: 650, duration_days: 90, proxy_limit: 999, reroll_enabled: 1, description: 'VIP+ на 3 месяца' },
+        { id: 'free', duration_days: 0, stars: 0, reroll_limit: 3, reroll_window_sec: 14400, reroll_cd_sec: 0 }, // 4 часа
+        { id: 'plus_10', duration_days: 10, stars: 13, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 }, // 5 мин
+        { id: 'plus_30', duration_days: 30, stars: 30, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 },
+        { id: 'plus_60', duration_days: 60, stars: 50, reroll_limit: 10, reroll_window_sec: 300, reroll_cd_sec: 10 },
     ];
     
     for (const plan of defaultPlans) {
@@ -124,11 +126,13 @@ export interface User {
     id: number;
     username: string | null;
     first_name: string | null;
-    plan: 'free' | 'vip' | 'vip_plus';
-    vip_until: string | null;
+    plan: 'free' | 'plus';
+    plus_until: string | null;
     sub_notified: number;
-    last_free_at: string | null;
-    last_proxy_id: number | null;
+    reroll_count: number;
+    reroll_window_start: string | null;
+    last_reroll_at: string | null;
+    shown_proxy_ids: string; // JSON массив
     joined_at: string;
 }
 
@@ -147,24 +151,21 @@ export interface Proxy {
 
 export interface Plan {
     id: string;
-    name: string;
-    plan_type: 'vip' | 'vip_plus';
-    price_rub: number;
-    price_stars: number | null;
     duration_days: number;
-    proxy_limit: number;
-    reroll_enabled: number;
-    description: string | null;
+    stars: number;
+    reroll_limit: number;
+    reroll_window_sec: number;
+    reroll_cd_sec: number;
 }
 
 export interface Payment {
     id: number;
     user_id: number;
-    plan_id: string;
-    amount: number;
-    provider: 'stars' | 'crypto' | 'card';
-    invoice_payload: string | null;
-    status: 'pending' | 'paid' | 'failed' | 'refunded';
+    plan: string;
+    duration_days: number;
+    stars_amount: number;
+    status: 'pending' | 'paid' | 'failed';
+    payload: string | null;
     created_at: string;
     paid_at: string | null;
 }
@@ -183,27 +184,19 @@ const stmtGetUser = db.prepare<[number], User>(`
   SELECT * FROM users WHERE id = ?
 `);
 
-const stmtSetLastFreeAt = db.prepare(`
-  UPDATE users SET last_free_at = datetime('now') WHERE id = ?
-`);
-
-const stmtSetLastProxyId = db.prepare(`
-  UPDATE users SET last_proxy_id = ? WHERE id = ?
-`);
-
 // Проверка истечения подписок
 const stmtExpireSubscriptions = db.prepare(`
   UPDATE users 
-  SET plan = 'free', vip_until = NULL, sub_notified = 0
-  WHERE vip_until IS NOT NULL AND vip_until < datetime('now')
+  SET plan = 'free', plus_until = NULL, sub_notified = 0
+  WHERE plus_until IS NOT NULL AND plus_until < datetime('now')
 `);
 
 // Получить пользователей для уведомления (подписка истекает через 24ч)
 const stmtGetUsersForNotification = db.prepare<[], User>(`
   SELECT * FROM users
-  WHERE vip_until IS NOT NULL
+  WHERE plus_until IS NOT NULL
     AND sub_notified = 0
-    AND datetime(vip_until) BETWEEN datetime('now', '+23 hours') AND datetime('now', '+25 hours')
+    AND datetime(plus_until) BETWEEN datetime('now', '+23 hours') AND datetime('now', '+25 hours')
 `);
 
 const stmtSetSubNotified = db.prepare(`
@@ -214,15 +207,20 @@ const stmtResetSubNotified = db.prepare(`
   UPDATE users SET sub_notified = 0 WHERE id = ?
 `);
 
+const stmtUpdateRerollData = db.prepare(`
+  UPDATE users 
+  SET reroll_count = @reroll_count, 
+      reroll_window_start = @reroll_window_start,
+      last_reroll_at = @last_reroll_at,
+      shown_proxy_ids = @shown_proxy_ids
+  WHERE id = @id
+`);
+
 export const users = {
     upsert: (id: number, username?: string, first_name?: string) => 
         stmtUpsertUser.run({ id, username: username ?? null, first_name: first_name ?? null }),
     
     get: (id: number): User | undefined => stmtGetUser.get(id),
-    
-    setLastFreeAt: (id: number) => stmtSetLastFreeAt.run(id),
-    
-    setLastProxyId: (userId: number, proxyId: number) => stmtSetLastProxyId.run(proxyId, userId),
     
     // Истечение подписок
     expireSubscriptions: () => stmtExpireSubscriptions.run(),
@@ -234,25 +232,28 @@ export const users = {
     
     resetSubNotified: (id: number) => stmtResetSubNotified.run(id),
     
-    // Проверка VIP статуса
-    isVip: (user: User): boolean => {
+    // Проверка Plus статуса
+    isPlus: (user: User): boolean => {
         if (user.plan === 'free') return false;
-        if (!user.vip_until) return false;
-        return new Date(user.vip_until) > new Date();
+        if (!user.plus_until) return false;
+        return new Date(user.plus_until) > new Date();
     },
     
-    // Проверка лимита бесплатных прокси (1 раз в 24ч)
-    canGetFreeProxy: (user: User): boolean => {
-        if (!user.last_free_at) return true;
-        const lastFree = new Date(user.last_free_at);
-        const now = new Date();
-        return (now.getTime() - lastFree.getTime()) >= 24 * 60 * 60 * 1000;
+    // Обновить данные реролла
+    updateRerollData: (userId: number, rerollCount: number, windowStart: string | null, lastRerollAt: string | null, shownProxyIds: number[]) => {
+        stmtUpdateRerollData.run({
+            id: userId,
+            reroll_count: rerollCount,
+            reroll_window_start: windowStart,
+            last_reroll_at: lastRerollAt,
+            shown_proxy_ids: JSON.stringify(shownProxyIds)
+        });
     },
 };
 
 // ─── Plans ────────────────────────────────────────────────────────────────────
 
-const stmtGetAllPlans = db.prepare<[], Plan>(`SELECT * FROM plans ORDER BY price_rub ASC`);
+const stmtGetAllPlans = db.prepare<[], Plan>(`SELECT * FROM plans WHERE id != 'free' ORDER BY stars ASC`);
 const stmtGetPlanById = db.prepare<[string], Plan>(`SELECT * FROM plans WHERE id = ?`);
 
 export const plans = {
@@ -263,16 +264,16 @@ export const plans = {
 // ─── Payments ─────────────────────────────────────────────────────────────────
 
 const stmtCreatePayment = db.prepare(`
-  INSERT INTO payments (user_id, plan_id, amount, provider, invoice_payload, status)
-  VALUES (@user_id, @plan_id, @amount, @provider, @invoice_payload, @status)
+  INSERT INTO payments (user_id, plan, duration_days, stars_amount, status, payload)
+  VALUES (@user_id, @plan, @duration_days, @stars_amount, @status, @payload)
 `);
 
 const stmtGetPaymentById = db.prepare<[number], Payment>(`
   SELECT * FROM payments WHERE id = ?
 `);
 
-const stmtGetPaymentByInvoice = db.prepare<[string], Payment>(`
-  SELECT * FROM payments WHERE invoice_payload = ?
+const stmtGetPaymentByPayload = db.prepare<[string], Payment>(`
+  SELECT * FROM payments WHERE payload = ?
 `);
 
 const stmtUpdatePaymentStatus = db.prepare(`
@@ -292,11 +293,6 @@ const confirmPayment = db.transaction((paymentId: number) => {
         throw new Error('Payment not found or already processed');
     }
     
-    const plan = stmtGetPlanById.get(payment.plan_id);
-    if (!plan) {
-        throw new Error('Plan not found');
-    }
-    
     const user = stmtGetUser.get(payment.user_id);
     if (!user) {
         throw new Error('User not found');
@@ -306,49 +302,48 @@ const confirmPayment = db.transaction((paymentId: number) => {
     stmtUpdatePaymentStatus.run({ id: paymentId, status: 'paid' });
     
     // Продлеваем подписку
-    let newVipUntil: Date;
-    if (user.vip_until && new Date(user.vip_until) > new Date()) {
+    let newPlusUntil: Date;
+    if (user.plus_until && new Date(user.plus_until) > new Date()) {
         // Если подписка активна — прибавляем к текущей дате
-        newVipUntil = new Date(user.vip_until);
-        newVipUntil.setDate(newVipUntil.getDate() + plan.duration_days);
+        newPlusUntil = new Date(user.plus_until);
+        newPlusUntil.setDate(newPlusUntil.getDate() + payment.duration_days);
     } else {
         // Если подписки нет или истекла — начинаем с текущей даты
-        newVipUntil = new Date();
-        newVipUntil.setDate(newVipUntil.getDate() + plan.duration_days);
+        newPlusUntil = new Date();
+        newPlusUntil.setDate(newPlusUntil.getDate() + payment.duration_days);
     }
     
     // Обновляем пользователя
     db.prepare(`
         UPDATE users 
-        SET plan = @plan, vip_until = @vip_until, sub_notified = 0
+        SET plan = 'plus', plus_until = @plus_until, sub_notified = 0
         WHERE id = @id
     `).run({
         id: payment.user_id,
-        plan: plan.plan_type,
-        vip_until: newVipUntil.toISOString(),
+        plus_until: newPlusUntil.toISOString(),
     });
     
-    return { payment, plan, newVipUntil };
+    return { payment, newPlusUntil };
 });
 
 export const payments = {
-    create: (user_id: number, plan_id: string, amount: number, provider: 'stars' | 'crypto' | 'card', invoice_payload?: string) => {
+    create: (user_id: number, plan: string, duration_days: number, stars_amount: number, payload?: string) => {
         const result = stmtCreatePayment.run({
             user_id,
-            plan_id,
-            amount,
-            provider,
-            invoice_payload: invoice_payload ?? null,
+            plan,
+            duration_days,
+            stars_amount,
             status: 'pending',
+            payload: payload ?? null,
         });
         return result.lastInsertRowid as number;
     },
     
     getById: (id: number): Payment | undefined => stmtGetPaymentById.get(id),
     
-    getByInvoice: (invoice_payload: string): Payment | undefined => stmtGetPaymentByInvoice.get(invoice_payload),
+    getByPayload: (payload: string): Payment | undefined => stmtGetPaymentByPayload.get(payload),
     
-    updateStatus: (id: number, status: 'paid' | 'failed' | 'refunded') => 
+    updateStatus: (id: number, status: 'paid' | 'failed') => 
         stmtUpdatePaymentStatus.run({ id, status }),
     
     getUserPayments: (user_id: number): Payment[] => stmtGetUserPayments.all(user_id),
@@ -386,29 +381,139 @@ const stmtGetVipProxy = db.prepare<[string], Proxy>(`
   LIMIT 1
 `);
 
-// Следующий прокси для reroll — исключаем массив ID
-const stmtGetNextProxy = db.prepare<[string], Proxy>(`
+// Прокси для новых пользователей (средний по рейтингу)
+const stmtGetProxyForNewUser = db.prepare<[], Proxy>(`
+  SELECT * FROM proxies
+  WHERE status = 'active' AND type = 'MTPROTO'
+  ORDER BY likes ASC
+  LIMIT 1 OFFSET (
+    SELECT COUNT(*) / 2 FROM proxies 
+    WHERE status = 'active' AND type = 'MTPROTO'
+  )
+`);
+
+// Plus прокси (лучшие по рейтингу)
+const stmtGetPlusProxy = db.prepare<[string], Proxy>(`
   SELECT * FROM proxies
   WHERE status = 'active' AND type = ?
-  ORDER BY likes DESC, RANDOM()
+  ORDER BY likes DESC, ping_ms ASC
   LIMIT 1
 `);
 
-// Функция для получения следующего прокси с исключением массива ID
-function getNextProxyExcluding(type: string, excludeIds: number[]): Proxy | undefined {
-    if (excludeIds.length === 0) {
-        return stmtGetNextProxy.get(type);
+// Free прокси (случайный)
+const stmtGetFreeProxy = db.prepare<[string], Proxy>(`
+  SELECT * FROM proxies
+  WHERE status = 'active' AND type = ?
+  ORDER BY RANDOM()
+  LIMIT 1
+`);
+
+// Следующий прокси с учётом shown_proxy_ids
+function getNextProxyWithHistory(type: string, shownIds: number[], isPlus: boolean): Proxy | undefined {
+    let query: string;
+    let params: any[];
+    
+    if (shownIds.length === 0) {
+        // Первый прокси
+        if (isPlus) {
+            query = `SELECT * FROM proxies WHERE status = 'active' AND type = ? ORDER BY likes DESC, ping_ms ASC LIMIT 1`;
+            params = [type];
+        } else {
+            query = `SELECT * FROM proxies WHERE status = 'active' AND type = ? ORDER BY RANDOM() LIMIT 1`;
+            params = [type];
+        }
+    } else {
+        // Исключаем уже показанные
+        const placeholders = shownIds.map(() => '?').join(',');
+        if (isPlus) {
+            query = `SELECT * FROM proxies WHERE status = 'active' AND type = ? AND id NOT IN (${placeholders}) ORDER BY likes DESC, ping_ms ASC LIMIT 1`;
+        } else {
+            query = `SELECT * FROM proxies WHERE status = 'active' AND type = ? AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`;
+        }
+        params = [type, ...shownIds];
     }
     
-    const placeholders = excludeIds.map(() => '?').join(',');
-    const query = `
-        SELECT * FROM proxies
-        WHERE status = 'active' AND type = ? AND id NOT IN (${placeholders})
-        ORDER BY likes DESC, RANDOM()
-        LIMIT 1
-    `;
-    const stmt = db.prepare<[string, ...number[]], Proxy>(query);
-    return stmt.get(type, ...excludeIds);
+    const stmt = db.prepare<any[], Proxy>(query);
+    return stmt.get(...params);
+}
+
+// Проверка возможности реролла
+function canReroll(userId: number): { allowed: boolean; reason: 'cd' | 'limit' | 'ok'; wait_sec?: number } {
+    const user = stmtGetUser.get(userId);
+    if (!user) return { allowed: false, reason: 'ok' };
+    
+    const now = new Date();
+    const isPlus = users.isPlus(user);
+    const planConfig = stmtGetPlanById.get(isPlus ? 'plus_10' : 'free');
+    if (!planConfig) return { allowed: false, reason: 'ok' };
+    
+    // Проверяем кулдаун (только для Plus)
+    if (isPlus && user.last_reroll_at) {
+        const lastReroll = new Date(user.last_reroll_at);
+        const cdMs = planConfig.reroll_cd_sec * 1000;
+        const timeSinceLastReroll = now.getTime() - lastReroll.getTime();
+        
+        if (timeSinceLastReroll < cdMs) {
+            const waitSec = Math.ceil((cdMs - timeSinceLastReroll) / 1000);
+            return { allowed: false, reason: 'cd', wait_sec: waitSec };
+        }
+    }
+    
+    // Проверяем лимит в окне
+    if (user.reroll_window_start) {
+        const windowStart = new Date(user.reroll_window_start);
+        const windowMs = planConfig.reroll_window_sec * 1000;
+        const timeSinceWindowStart = now.getTime() - windowStart.getTime();
+        
+        if (timeSinceWindowStart < windowMs) {
+            // Окно ещё активно
+            if (user.reroll_count >= planConfig.reroll_limit) {
+                const waitSec = Math.ceil((windowMs - timeSinceWindowStart) / 1000);
+                return { allowed: false, reason: 'limit', wait_sec: waitSec };
+            }
+        }
+        // Если окно истекло, счётчик сбросится в recordReroll
+    }
+    
+    return { allowed: true, reason: 'ok' };
+}
+
+// Записать реролл
+function recordReroll(userId: number): void {
+    const user = stmtGetUser.get(userId);
+    if (!user) return;
+    
+    const now = new Date();
+    const isPlus = users.isPlus(user);
+    const planConfig = stmtGetPlanById.get(isPlus ? 'plus_10' : 'free');
+    if (!planConfig) return;
+    
+    let newCount = user.reroll_count;
+    let newWindowStart = user.reroll_window_start;
+    
+    // Проверяем нужно ли сбросить окно
+    if (user.reroll_window_start) {
+        const windowStart = new Date(user.reroll_window_start);
+        const windowMs = planConfig.reroll_window_sec * 1000;
+        const timeSinceWindowStart = now.getTime() - windowStart.getTime();
+        
+        if (timeSinceWindowStart >= windowMs) {
+            // Окно истекло, сбрасываем
+            newCount = 0;
+            newWindowStart = null;
+        }
+    }
+    
+    // Если окна нет или оно сброшено, создаём новое
+    if (!newWindowStart) {
+        newWindowStart = now.toISOString();
+        newCount = 0;
+    }
+    
+    // Увеличиваем счётчик
+    newCount += 1;
+    
+    users.updateRerollData(userId, newCount, newWindowStart, now.toISOString(), JSON.parse(user.shown_proxy_ids));
 }
 
 const stmtGetUnchecked = db.prepare<[], Proxy>(`
@@ -455,13 +560,47 @@ const stmtCountByStatus = db.prepare<[string], { count: number }>(`
 export const proxies = {
     insert: (type: string, link: string) =>
         stmtInsertProxy.run({ type, link, status: "unchecked" }),
+    
     getFastActive: (): Proxy | undefined => stmtGetFastActive.get(),
     getFastActiveByType: (type: string): Proxy | undefined => stmtGetFastActiveByType.get(type),
-    getVipProxy: (type: string): Proxy | undefined => stmtGetVipProxy.get(type),
     
-    // Получить следующий прокси с исключением массива ID (для реролла)
-    getNextProxy: (type: string, excludeIds: number[] = []): Proxy | undefined => 
-        getNextProxyExcluding(type, excludeIds),
+    // Прокси для новых пользователей (средний по рейтингу)
+    getProxyForNewUser: (): Proxy | undefined => stmtGetProxyForNewUser.get(),
+    
+    // Получить следующий прокси с учётом shown_proxy_ids и инфинити-ролла
+    getNextProxy: (userId: number, type: string = "MTPROTO"): Proxy | undefined => {
+        const user = stmtGetUser.get(userId);
+        if (!user) return undefined;
+        
+        const isPlus = users.isPlus(user);
+        const shownIds: number[] = JSON.parse(user.shown_proxy_ids);
+        
+        // Получаем общее количество активных прокси
+        const totalActive = stmtCountByStatus.get('active')?.count ?? 0;
+        
+        // Если показали все прокси, сбрасываем список (инфинити-ролл)
+        if (shownIds.length >= totalActive && totalActive > 0) {
+            users.updateRerollData(userId, user.reroll_count, user.reroll_window_start, user.last_reroll_at, []);
+            return getNextProxyWithHistory(type, [], isPlus);
+        }
+        
+        // Получаем следующий прокси
+        const proxy = getNextProxyWithHistory(type, shownIds, isPlus);
+        
+        // Добавляем в список показанных
+        if (proxy) {
+            const newShownIds = [...shownIds, proxy.id];
+            users.updateRerollData(userId, user.reroll_count, user.reroll_window_start, user.last_reroll_at, newShownIds);
+        }
+        
+        return proxy;
+    },
+    
+    // Проверка возможности реролла
+    canReroll: (userId: number) => canReroll(userId),
+    
+    // Записать реролл
+    recordReroll: (userId: number) => recordReroll(userId),
     
     getById: (id: number): Proxy | undefined => stmtGetById.get(id),
     getUnchecked: (): Proxy[] => stmtGetUnchecked.all(),
