@@ -11,6 +11,7 @@ export const SOURCES: Array<{
     { name: "mtpro_xyz",     url: "https://t.me/s/mtpro_xyz",     type: "MTPROTO", parser: "tme_proxy" },
     { name: "proxyListFree", url: "https://t.me/s/proxyListFree", type: "MTPROTO", parser: "tme_proxy" },
     { name: "mtrproxytg",    url: "https://t.me/s/mtrproxytg",    type: "MTPROTO", parser: "tme_raw_fields" },
+    { name: "ProxyMTProto",  url: "https://t.me/s/ProxyMTProto",  type: "MTPROTO", parser: "tme_raw_fields" },
     { name: "toproxylab",    url: "https://t.me/s/toproxylab",    type: "SOCKS5",  parser: "toproxylab_socks5" },
     { name: "grim1313",      url: "https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt", type: "MTPROTO", parser: "tme_proxy" },
 ];
@@ -30,15 +31,18 @@ function parseTmeProxy(html: string): string[] {
     return result;
 }
 
-// Server: X / Port: Y / Secret: Z из текста постов @mtrproxytg
+// Server: X / Port: Y / Secret: Z из текста постов (@mtrproxytg, @ProxyMTProto)
 function parseTmeRawFields(html: string): string[] {
     const result: string[] = [];
-    const blocks = html.matchAll(/Server:\s*([^\s<]+)[\s\S]*?Port:\s*(\d+)[\s\S]*?Secret:\s*([a-fA-F0-9]+)/g);
+    // Secret может быть hex или base64 (с = на конце)
+    const blocks = html.matchAll(/Server:\s*([^\s<\n]+)[\s\S]*?Port:\s*(\d+)[\s\S]*?Secret:\s*([a-zA-Z0-9+/=]+)/g);
     for (const m of blocks) {
         const [, server, port, secret] = m;
-        if (server && port && secret) {
-            result.push(`tg://proxy?server=${server}&port=${port}&secret=${secret}`);
-        }
+        // Пропускаем явно невалидные
+        if (!server || !port || !secret) continue;
+        if (server === "Unknown") continue;
+        if (secret.length < 8) continue;
+        result.push(`tg://proxy?server=${server.trim()}&port=${port}&secret=${secret.trim()}`);
     }
     return result;
 }
