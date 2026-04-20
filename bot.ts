@@ -18,19 +18,6 @@ function proxyMessage(proxy: Proxy): string {
     return `✅ MTProto прокси${ping}${rep}${fire}:\n\n\`${proxy.link}\`\n\nНажмите кнопку ниже — Telegram сразу предложит применить.`;
 }
 
-function proxyKeyboard(proxyId: number, isVip: boolean): InlineKeyboard {
-    const kb = new InlineKeyboard()
-        .url("⚡ Применить прокси", `tg://proxy?${proxyId}`) // placeholder, реальная ссылка в тексте
-        .row()
-        .text("👍", `vote_like_${proxyId}`)
-        .text("🔥", `vote_fire_${proxyId}`)
-        .text("👎", `vote_dislike_${proxyId}`);
-    if (isVip) {
-        kb.row().text("🔄 Следующий прокси", `reroll_${proxyId}`);
-    }
-    return kb;
-}
-
 function buildProxyKeyboard(proxy: Proxy, isVip: boolean): InlineKeyboard {
     const kb = new InlineKeyboard()
         .url("⚡ Применить прокси", proxy.link)
