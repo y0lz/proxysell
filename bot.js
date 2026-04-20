@@ -244,12 +244,25 @@ bot.callbackQuery(/^vote_(like|dislike|fire)_(\d+)$/, async (ctx) => {
                 show_alert: true,
             });
         }
+        // Проверяем, что это не тот же прокси (избегаем ошибки "message is not modified")
+        if (nextProxy.id === proxyId) {
+            return ctx.answerCallbackQuery({ text: "👎 Учтём ваш отзыв!" });
+        }
         // Проверяем можно ли ещё делать реролл после этого
         const canRerollNext = isPlus || proxies.canReroll(userId).allowed;
-        await ctx.editMessageText(proxyMessage(nextProxy), {
-            parse_mode: "Markdown",
-            reply_markup: buildProxyKeyboard(nextProxy, isPlus, canRerollNext),
-        });
+        try {
+            await ctx.editMessageText(proxyMessage(nextProxy), {
+                parse_mode: "Markdown",
+                reply_markup: buildProxyKeyboard(nextProxy, isPlus, canRerollNext),
+            });
+        }
+        catch (error) {
+            // Если сообщение не изменилось, просто показываем уведомление
+            if (error.description?.includes("message is not modified")) {
+                return ctx.answerCallbackQuery({ text: "👎 Учтём ваш отзыв!" });
+            }
+            throw error;
+        }
     }
     else {
         await ctx.answerCallbackQuery({ text: labels[vote] });
