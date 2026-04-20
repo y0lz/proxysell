@@ -19,7 +19,7 @@ function buildMainMenu(): InlineKeyboard {
     return new InlineKeyboard()
         .text("🟩 Получить прокси", "get_proxy").row()
         .text("⭐ Купить Plus", "buy_plus").row()
-        .text("❓ Помощь", "help");
+        .text("👤 Профиль", "profile");
 }
 
 function buildProxyKeyboard(proxy: Proxy, isPlus: boolean, canReroll: boolean = true): InlineKeyboard {
@@ -48,6 +48,12 @@ function buildPlusMenu(): InlineKeyboard {
         .text("⭐ 10 дней — 13 ⭐", "plus_buy_plus_10").row()
         .text("⭐ 30 дней — 30 ⭐", "plus_buy_plus_30").row()
         .text("⭐ 60 дней — 50 ⭐", "plus_buy_plus_60").row()
+        .text("🏠 Главное меню", "main_menu");
+}
+
+function buildProfileMenu(): InlineKeyboard {
+    return new InlineKeyboard()
+        .text("❓ Помощь", "help").row()
         .text("🏠 Главное меню", "main_menu");
 }
 
@@ -354,6 +360,73 @@ bot.callbackQuery(/^plus_buy_(.+)$/, async (ctx) => {
         `Теперь вы можете делать безлимитные реролы с лучшими прокси!`,
         { parse_mode: "Markdown" }
     );
+});
+
+// ─── Профиль ──────────────────────────────────────────────────────────────────
+
+bot.callbackQuery("profile", async (ctx) => {
+    const userId = ctx.from.id;
+    const user = users.get(userId);
+    
+    if (!user) {
+        await ctx.answerCallbackQuery({ text: "❌ Пользователь не найден", show_alert: true });
+        return;
+    }
+
+    const isPlus = users.isPlus(user);
+    const shownProxies = JSON.parse(user.shown_proxy_ids).length;
+    const joinDate = new Date(user.joined_at).toLocaleDateString("ru-RU", {
+        day: "numeric",
+        month: "long", 
+        year: "numeric"
+    });
+
+    let subscriptionInfo = "";
+    if (isPlus && user.plus_until) {
+        const untilDate = new Date(user.plus_until).toLocaleDateString("ru-RU", {
+            day: "numeric",
+            month: "long",
+            year: "numeric"
+        });
+        const daysLeft = Math.ceil((new Date(user.plus_until).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+        subscriptionInfo = `⭐ *Plus подписка*\n` +
+                          `Действует до: ${untilDate}\n` +
+                          `Осталось дней: ${daysLeft}\n\n`;
+    } else {
+        subscriptionInfo = `🆓 *Free подписка*\n` +
+                          `Лимит: 3 прокси каждые 4 часа\n\n`;
+    }
+
+    // Информация о рероллах
+    let rerollInfo = "";
+    if (user.reroll_count > 0 && user.reroll_window_start) {
+        const windowStart = new Date(user.reroll_window_start);
+        const now = new Date();
+        const planConfig = isPlus ? { reroll_window_sec: 86400 } : { reroll_window_sec: 14400 };
+        const windowEnd = new Date(windowStart.getTime() + planConfig.reroll_window_sec * 1000);
+        
+        if (windowEnd > now) {
+            const hoursLeft = Math.ceil((windowEnd.getTime() - now.getTime()) / (1000 * 60 * 60));
+            rerollInfo = `🔄 Использовано рероллов: ${user.reroll_count}\n` +
+                        `⏰ Окно сбросится через: ${hoursLeft}ч\n\n`;
+        }
+    }
+
+    await ctx.editMessageText(
+        `👤 *Ваш профиль*\n\n` +
+        `${subscriptionInfo}` +
+        `📊 *Статистика:*\n` +
+        `Просмотрено прокси: ${shownProxies}\n` +
+        `Дата регистрации: ${joinDate}\n\n` +
+        `${rerollInfo}` +
+        `💡 *Как работает бот:*\n` +
+        `• Скрапим прокси из открытых источников\n` +
+        `• Проверяем их скорость из России\n` +
+        `• Сортируем по рейтингу пользователей\n` +
+        `• Plus получает лучшие прокси первыми`,
+        { parse_mode: "Markdown", reply_markup: buildProfileMenu() }
+    );
+    await ctx.answerCallbackQuery();
 });
 
 // ─── Помощь ───────────────────────────────────────────────────────────────────
