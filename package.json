@@ -1,19 +1,29 @@
 {
   "name": "proxysell",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "ProxyRoll - Telegram bot for MTProto proxy distribution with subscription system",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "dev": "tsx watch index.ts",
-    "start": "tsx index.ts",
+    "start": "node index.js",
+    "start:dev": "tsx index.ts",
     "agent": "tsx checker-agent.ts",
     "build": "tsc",
+    "clean": "rm -rf *.js *.js.map",
+    "lint": "tsc --noEmit",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": [
+    "telegram",
+    "bot",
+    "proxy",
+    "mtproto",
+    "subscription",
+    "scraper"
+  ],
+  "author": "ProxyRoll Team",
+  "license": "MIT",
   "dependencies": {
     "axios": "^1.15.0",
     "better-sqlite3": "^12.9.0",
@@ -27,5 +37,8 @@
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

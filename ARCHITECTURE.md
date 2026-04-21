@@ -1,382 +1,218 @@
-# Anti-Block Bot — Полная архитектура проекта
+# ProxyRoll Bot - Архитектура
 
-## Обзор
+## 🏗️ Обзор системы
 
-Два сервера работают вместе:
+ProxyRoll - это Telegram бот для автоматического сбора, проверки и распределения MTProto прокси с системой подписок и рейтингов.
 
-```
-┌─────────────────────────────────┐     HTTP API      ┌──────────────────────────┐
-│        NL сервер                │◄──────────────────►│      RU агент            │
-│  (Нидерланды, основной)         │                    │  (Россия, checker-agent) │
-│                                 │                    │                          │
-│  • Telegram бот (grammY)        │                    │  • Проверяет прокси      │
-│  • Скрапер (4 источника)        │                    │    через TCP из РФ       │
-│  • SQLite база данных           │                    │  • Шлёт результаты       │
-│  • HTTP API на порту 3000       │                    │    на NL сервер          │
-│  • Fallback чекер (NL)          │                    │  • Health-check :3001    │
-└─────────────────────────────────┘                    └──────────────────────────┘
-```
-
-**Почему два сервера:** прокси нужно проверять из России — только так можно убедиться что они работают для российских пользователей. NL сервер не может это проверить (Telegram там не заблокирован).
-
----
-
-## Файлы проекта
-
-| Файл | Где запускается | Назначение |
-|---|---|---|
-| `index.ts` | NL | Точка входа: бот + API + планировщики |
-| `bot.ts` | NL | Telegram бот (grammY) |
-| `scraper.ts` | NL | Скрапинг прокси из источников |
-| `checker.ts` | NL | Fallback чекер (не трогает MTProto) |
-| `db.ts` | NL | Вся логика SQLite |
-| `checker-agent.ts` | RU | Агент проверки прокси из России |
-
----
-
-## Поток данных
-
-### 1. Скрапинг (NL, каждые 2 часа)
+## 📁 Структура проекта
 
 ```
-scraper.ts
-    │
-    ├── GET https://t.me/s/mtpro_xyz
-    ├── GET https://t.me/s/proxyListFree
-    ├── GET https://t.me/s/mtrproxytg
-    └── GET https://raw.githubusercontent.com/Grim1313/...
-            │
-            ▼ parseUniversal() — ищет:
-              1. tg://proxy?... ссылки
-              2. https://t.me/proxy?... ссылки
-              3. Server:/Port:/Secret: поля в тексте
-            │
-            ▼
-        db.proxies.insert(type="MTPROTO", link, status="unchecked")
+proxysell/
+├── src/
+│   ├── bot.ts              # Основная логика Telegram бота
+│   ├── scraper.ts          # Скрапинг прокси из источников  
+│   ├── checker.ts          # Проверка работоспособности прокси
+│   ├── checker-agent.ts    # Агент проверки для удалённого сервера
+│   ├── db.ts              # База данных и ORM
+│   ├── notifications.ts    # Система уведомлений админу
+│   └── index.ts           # HTTP API и планировщики
+├── .env                   # Переменные окружения
+├── package.json           # Зависимости и скрипты
+├── tsconfig.json          # Конфигурация TypeScript
+└── README.md             # Документация
 ```
 
-После скрапинга все мёртвые MTProto сбрасываются в `unchecked` — чтобы RU агент их перепроверил.
-
----
-
-### 2. Проверка прокси (RU агент, каждые 15 минут)
+## 🔄 Архитектурная схема
 
 ```
-checker-agent.ts
-    │
-    ├── GET /stats → { active_mt: N, unchecked: M }
-    │       │
-    │       ├── если unchecked = 0 → POST /rescrape → ждём 45 сек
-    │       │
-    │       └── если active_mt < 10 → режим 🔴 агрессивный
-    │
-    ├── GET /unchecked → батч 100 прокси (MTProto в приоритете)
-    │
-    ├── Проверяем 100 параллельно:
-    │       │
-    │       ├── MTProto: TCP connect к host:port
-    │       │     если соединение открылось → active (ping = время соединения)
-    │       │     если таймаут/ошибка → dead
-    │       │
-    │       └── SOCKS5: HTTPS запрос к api.telegram.org через прокси
-    │             если ответ < 500 → active
-    │             если таймаут → dead
-    │
-    └── POST /report → отправляем результаты на NL
-            │
-            ▼
-        NL: db.proxies.setStatus(id, status, ping_ms)
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Telegram      │    │   ProxyRoll     │    │   Источники     │
+│   Users         │◄──►│   Bot           │◄──►│   прокси        │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              │
+                              ▼
+                       ┌─────────────────┐
+                       │   SQLite        │
+                       │   Database      │
+                       └─────────────────┘
+                              │
+                              ▼
+                       ┌─────────────────┐
+                       │   Checker       │
+                       │   Agent (RU)    │
+                       └─────────────────┘
 ```
 
----
+## 🗄️ База данных
 
-### 3. Перепроверка активных (NL, каждые 4 часа)
+### Таблицы:
 
+**users** - Пользователи бота
+- `id` - Telegram ID пользователя
+- `plan` - Тариф (free/plus)
+- `plus_until` - Дата истечения Plus
+- `reroll_count` - Счётчик рероллов в окне
+- `shown_proxy_ids` - JSON массив показанных прокси
+
+**proxies** - Прокси серверы
+- `link` - tg://proxy ссылка
+- `status` - Статус (unchecked/active/slow/dead)
+- `likes/dislikes/fires` - Рейтинг от пользователей
+- `ping_ms` - Пинг из России
+
+**proxy_votes** - Голоса пользователей
+- Связь many-to-many между users и proxies
+- Ограничение: один голос на прокси на пользователя
+
+**payments** - Платежи
+- Интеграция с Telegram Stars API
+- Статусы: pending/paid/failed
+
+**plans** - Тарифные планы
+- Конфигурация лимитов и цен
+
+## 🔧 Компоненты
+
+### 1. Bot (bot.ts)
+- **Назначение**: Обработка команд и взаимодействие с пользователями
+- **Функции**:
+  - Регистрация новых пользователей
+  - Выдача прокси с учётом лимитов
+  - Обработка голосований и рейтингов
+  - Система платежей через Telegram Stars
+  - Навигация по меню
+
+### 2. Scraper (scraper.ts)  
+- **Назначение**: Сбор прокси из внешних источников
+- **Источники**: 14 Telegram каналов + GitHub
+- **Функции**:
+  - Парсинг различных форматов прокси
+  - Валидация IP/домен/порт/секрет
+  - Дедупликация и статистика
+  - Автоматический запуск каждые 2 часа
+
+### 3. Checker (checker.ts)
+- **Назначение**: Проверка работоспособности прокси
+- **Функции**:
+  - Локальная проверка (fallback)
+  - Интеграция с удалённым агентом в России
+  - Измерение пинга и определение страны
+  - Обновление статусов в БД
+
+### 4. Database (db.ts)
+- **Назначение**: Работа с SQLite базой данных
+- **Функции**:
+  - ORM-подобный интерфейс
+  - Prepared statements для безопасности
+  - Транзакции для платежей
+  - Миграции схемы
+
+### 5. Notifications (notifications.ts)
+- **Назначение**: Уведомления администратора
+- **Функции**:
+  - Новые пользователи
+  - Покупки подписок
+  - Логирование в консоль + Telegram
+
+### 6. API Server (index.ts)
+- **Назначение**: HTTP API для интеграции с агентом проверки
+- **Endpoints**:
+  - `/stats` - статистика БД
+  - `/unchecked` - получить непроверенные прокси
+  - `/report` - отчёт о проверке
+  - `/rescrape` - запуск скрапинга
+
+## 🔄 Потоки данных
+
+### 1. Получение прокси пользователем:
 ```
-index.ts → setInterval(4h)
-    │
-    └── db.proxies.resetStaleActive(4)
-            │
-            ▼
-        UPDATE proxies SET status='unchecked'
-        WHERE status='active'
-        AND updated_at < datetime('now', '-4 hours')
-```
-
-Активные прокси старше 4 часов сбрасываются в `unchecked` → RU агент их перепроверит на следующем цикле.
-
----
-
-### 4. Выдача прокси пользователю (бот)
-
-```
-Пользователь нажимает "Получить прокси"
-    │
-    ├── Проверяем VIP статус (is_vip=1 AND vip_until > now)
-    │
-    ├── Если не VIP: проверяем last_free (лимит 1 раз в 24ч)
-    │
-    ├── Выбираем прокси из БД:
-    │       ├── VIP: ORDER BY likes DESC, ping_ms ASC (лучшие первыми)
-    │       └── Free: ORDER BY ping_ms ASC (быстрые первыми)
-    │
-    ├── Сохраняем users.last_proxy_id = proxy.id
-    │
-    └── Отправляем сообщение с:
-            ├── tg://proxy?... ссылка (кнопка "⚡ Применить")
-            ├── Кнопки голосования: 👍 🔥 👎
-            └── Кнопка 🔄 (только VIP)
-```
-
----
-
-### 5. Реролл (только VIP)
-
-```
-VIP нажимает 🔄
-    │
-    ├── Берём users.last_proxy_id (последний показанный)
-    │
-    ├── db.proxies.getNextProxy(type, excludeId)
-    │       └── SELECT WHERE id != excludeId
-    │           ORDER BY likes DESC, RANDOM()
-    │
-    ├── Сохраняем новый last_proxy_id
-    │
-    └── Редактируем сообщение (editMessageText)
-```
-
----
-
-### 6. Голосование за прокси
-
-```
-Пользователь нажимает 👍 / 🔥 / 👎
-    │
-    ├── INSERT INTO proxy_votes (proxy_id, user_id, vote)
-    │   ON CONFLICT DO UPDATE SET vote = новый_голос
-    │   (один пользователь = один голос на прокси, можно менять)
-    │
-    ├── UPDATE proxies SET
-    │       likes    = COUNT(vote='like')
-    │       dislikes = COUNT(vote='dislike')
-    │       fires    = COUNT(vote='fire')
-    │
-    └── Если dislikes >= 5 AND dislikes > likes * 2:
-            └── setStatus(id, 'dead') — прокси убирается из выдачи
-```
-
----
-
-## База данных (SQLite)
-
-### Таблица `users`
-
-| Поле | Тип | Описание |
-|---|---|---|
-| id | INTEGER PK | Telegram user_id |
-| username | TEXT | Telegram username |
-| first_name | TEXT | Имя пользователя |
-| plan | TEXT | 'free' / 'vip' / 'vip_plus' |
-| vip_until | TEXT | ISO-8601, когда истекает подписка |
-| sub_notified | INTEGER | 0/1 — флаг что уведомление о истечении отправлено |
-| last_free_at | TEXT | Когда последний раз брал бесплатный прокси (лимит 24ч) |
-| last_proxy_id | INTEGER | ID последнего показанного прокси (для реролла) |
-| joined_at | TEXT | Дата первого /start |
-
-**Индексы:** `idx_users_vip_until` для планировщика уведомлений.
-
-### Таблица `plans` (справочник тарифов)
-
-| Поле | Тип | Описание |
-|---|---|---|
-| id | TEXT PK | 'vip_1m', 'vip_3m', 'vip_plus_1m' и т.д. |
-| name | TEXT | Название тарифа |
-| plan_type | TEXT | 'vip' / 'vip_plus' |
-| price_rub | INTEGER | Цена в рублях |
-| price_stars | INTEGER | Цена в Telegram Stars |
-| duration_days | INTEGER | Длительность подписки в днях |
-| proxy_limit | INTEGER | Лимит прокси в день (999 = безлимит) |
-| reroll_enabled | INTEGER | 0/1 — доступен ли реролл |
-| description | TEXT | Описание тарифа |
-
-### Таблица `payments`
-
-| Поле | Тип | Описание |
-|---|---|---|
-| id | INTEGER PK | Автоинкремент |
-| user_id | INTEGER FK | → users.id |
-| plan_id | TEXT FK | → plans.id |
-| amount | INTEGER | Сумма платежа |
-| provider | TEXT | 'stars' / 'crypto' / 'card' |
-| invoice_payload | TEXT | Для Telegram Stars (идентификатор инвойса) |
-| status | TEXT | 'pending' / 'paid' / 'failed' / 'refunded' |
-| created_at | TEXT | Дата создания |
-| paid_at | TEXT | Дата оплаты |
-
-**Индексы:** `idx_payments_user_id`, `idx_payments_status`.
-
-### Таблица `proxies`
-
-| Поле | Тип | Описание |
-|---|---|---|
-| id | INTEGER PK | Автоинкремент |
-| type | TEXT | MTPROTO / SOCKS5 |
-| link | TEXT UNIQUE | tg://proxy?server=...&port=...&secret=... |
-| status | TEXT | unchecked → active/slow/dead |
-| ping_ms | INTEGER | Задержка TCP соединения в мс |
-| likes | INTEGER | Количество 👍 |
-| dislikes | INTEGER | Количество 👎 |
-| fires | INTEGER | Количество 🔥 |
-| country | TEXT | Страна (не используется активно) |
-| updated_at | TEXT | Время последнего изменения статуса |
-
-**Индексы:** `idx_proxies_status_type` для выдачи, `idx_proxies_updated_at` для очистки.
-
-### Таблица `proxy_votes`
-
-| Поле | Тип | Описание |
-|---|---|---|
-| proxy_id | INTEGER FK | → proxies.id (ON DELETE CASCADE) |
-| user_id | INTEGER FK | → users.id (ON DELETE CASCADE) |
-| vote | TEXT | like / dislike / fire |
-| created_at | TEXT | Время голоса |
-
-PRIMARY KEY (proxy_id, user_id) — один голос на пару, можно менять.
-
-### Жизненный цикл прокси
-
-```
-scraper добавляет
-        │
-        ▼
-   [unchecked]
-        │
-        ├── RU агент проверяет TCP
-        │
-        ├── ping <= 3000ms → [active]
-        ├── ping > 3000ms  → [slow]
-        └── ошибка/таймаут → [dead]
-                                │
-                                └── через 24ч → DELETE
-
-[active] ──── каждые 4ч ────► [unchecked] (перепроверка)
-[active] ──── 5+ дизлайков ──► [dead]
+User → /start → Bot → DB.getNextProxy() → Proxy + Keyboard
 ```
 
-### Жизненный цикл подписки
-
+### 2. Скрапинг новых прокси:
 ```
-Пользователь покупает подписку
-        │
-        ▼
-   payments (status='pending')
-        │
-        ├── Оплата подтверждена (webhook)
-        │
-        ▼
-   payments (status='paid') + users.plan обновлён
-        │
-        ├── Если подписка активна → vip_until += duration_days
-        └── Если подписки нет → vip_until = now + duration_days
-        │
-        └── sub_notified = 0 (сброс флага уведомления)
-
-Планировщик каждый час:
-    ├── Проверяет vip_until через 24ч И sub_notified=0
-    │       └── Отправляет уведомление → sub_notified=1
-    │
-    └── Проверяет vip_until < now
-            └── plan='free', vip_until=NULL, sub_notified=0
+Scheduler → Scraper → Parse Sources → Validate → DB.insert()
 ```
 
----
-
-## HTTP API (NL сервер :3000)
-
-Все запросы требуют заголовок `x-api-secret: <секрет>`.
-
-| Метод | Путь | Описание |
-|---|---|---|
-| GET | /stats | `{ active_mt, unchecked }` — статистика для агента |
-| GET | /unchecked | Батч 100 непроверенных (MTProto в приоритете) |
-| POST | /report | Принять результаты проверки `[{id, status, ping_ms}]` |
-| POST | /rescrape | Запустить скрапер (cooldown 30 мин) |
-| POST | /restart | Перезапустить NL процесс (PM2 поднимет) |
-| POST | /restart-peer | Перезапустить RU агент |
-
-## Health-check (RU агент :3001)
-
-| Метод | Путь | Описание |
-|---|---|---|
-| GET | /ping | `ok` — проверка живости (без авторизации) |
-| POST | /restart | Перезапустить агент |
-| POST | /restart-peer | Перезапустить NL сервер |
-
----
-
-## Планировщики (NL сервер)
-
-| Интервал | Действие |
-|---|---|
-| Старт + каждые 2ч | Скрапинг всех источников |
-| Каждые 30 мин | NL fallback чекер (только SOCKS5, MTProto пропускает) |
-| Каждый час | Истечение подписок (plan='free', vip_until=NULL) |
-| Каждый час | Уведомления о подписке (за 24ч до истечения) |
-| Каждые 4ч | Сброс активных прокси старше 4ч на перепроверку |
-
-## Планировщики (RU агент)
-
-| Интервал | Действие |
-|---|---|
-| Старт + каждые 15 мин | Полный цикл проверки всех unchecked |
-
----
-
-## Переменные окружения
-
-### NL сервер
-```env
-DATABASE_URL=file:./dev.db
-BOT_TOKEN=...
-API_PORT=3000
-API_SECRET=...          # общий секрет с RU агентом
-AGENT_URL=http://RU_IP:3001
+### 3. Проверка прокси:
+```
+Scheduler → Checker → Get Unchecked → Test → Update Status
 ```
 
-### RU агент
-```env
-MAIN_SERVER_URL=http://NL_IP:3000
-API_SECRET=...          # тот же что на NL
-HEALTH_PORT=3001
+### 4. Покупка подписки:
+```
+User → Buy Plus → Telegram Stars → Payment Webhook → DB.confirm()
 ```
 
----
+## ⚡ Производительность
 
-## Запуск
+### Оптимизации:
+- **Индексы БД**: на часто запрашиваемые поля
+- **Prepared statements**: для быстрых запросов
+- **Connection pooling**: для SQLite
+- **Кэширование**: планов и конфигураций
+- **Batch операции**: для массовых обновлений
 
-```bash
-# NL сервер
-npm run start    # tsx index.ts
+### Масштабирование:
+- **Горизонтальное**: несколько checker агентов
+- **Вертикальное**: увеличение ресурсов сервера
+- **Кэширование**: Redis для сессий (будущее)
+- **Шардинг**: разделение по регионам (будущее)
 
-# RU агент
-npm run agent    # tsx checker-agent.ts
-```
+## 🔐 Безопасность
 
-PM2:
-```bash
-# NL
-pm2 start npm --name "proxysell" -- run start
+### Меры защиты:
+- **SQL Injection**: Prepared statements
+- **Rate Limiting**: Кулдауны на действия
+- **Input Validation**: Проверка всех входных данных
+- **API Authentication**: Секретные ключи для API
+- **Payment Security**: Официальный Telegram Stars API
 
-# RU
-pm2 start npm --name "proxy-agent" -- run agent
-```
+### Мониторинг:
+- **Логирование**: Все действия пользователей
+- **Алерты**: Уведомления админу
+- **Метрики**: Статистика использования
+- **Health Checks**: Проверка состояния системы
 
-Перезапуск через API:
-```bash
-# Перезапустить RU агент с NL:
-curl -X POST http://localhost:3000/restart-peer -H "x-api-secret: СЕКРЕТ"
+## 🚀 Развёртывание
 
-# Перезапустить NL с RU:
-curl -X POST http://localhost:3001/restart-peer -H "x-api-secret: СЕКРЕТ"
-```
+### Требования:
+- **Node.js** 18+
+- **SQLite** 3.x
+- **PM2** для управления процессами
+- **Nginx** для проксирования (опционально)
+
+### Процесс:
+1. Клонирование репозитория
+2. Установка зависимостей
+3. Настройка переменных окружения
+4. Сборка TypeScript
+5. Запуск через PM2
+6. Настройка планировщиков
+
+## 📈 Мониторинг и логи
+
+### Логирование:
+- **Console**: Основные события
+- **Telegram**: Критические ошибки админу
+- **Files**: Детальные логи (будущее)
+
+### Метрики:
+- Количество активных пользователей
+- Статистика прокси по статусам
+- Конверсия Free → Plus
+- Производительность скрапинга
+
+## 🔮 Планы развития
+
+### Краткосрочные:
+- [ ] Веб-интерфейс для админа
+- [ ] API для внешних интеграций
+- [ ] Больше источников прокси
+- [ ] Улучшенная аналитика
+
+### Долгосрочные:
+- [ ] Поддержка SOCKS5 прокси
+- [ ] Мобильное приложение
+- [ ] Система рефералов
+- [ ] Географическое распределение
